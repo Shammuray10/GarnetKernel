@@ -409,35 +409,42 @@ jobs:
           [ -f kernel/out/arch/arm64/boot/dtbo.img ] && \
             cp kernel/out/arch/arm64/boot/dtbo.img anykernel/ || true
 
-          # anykernel.sh para garnet
-          cat > anykernel/anykernel.sh << 'AKEOF'
-# AnyKernel3 config — GarnetKernel
-properties() { '
-kernel.string=GarnetKernel by Shammuray10 | KSU Next v3.2.0 + SUSFS v2.0.0
-do.devicecheck=1
-do.modules=0
-do.systemless=1
-do.cleanup=1
-do.cleanuponabort=0
-device.name1=garnet
-device.name2=parrot
-device.name3=2312DRA50G
-device.name4=Redmi Note 13 Pro 5G
-supported.versions=
-supported.patchlevels=
-'; }
-
-block=/dev/block/bootdevice/by-name/boot;
-is_slot_device=0;
-ramdisk_compression=auto;
-patch_vbmeta_flag=auto;
-
-. tools/ak3-core.sh;
-. tools/busybox sh;
-
-dump_boot;
-write_boot;
-AKEOF
+          # anykernel.sh — copiado desde el repo (evita problemas de YAML)
+          if [ -f "${{ github.workspace }}/garnet-scripts/anykernel/anykernel.sh" ]; then
+            cp "${{ github.workspace }}/garnet-scripts/anykernel/anykernel.sh" anykernel/
+            echo "anykernel.sh copiado desde repo"
+          else
+            # Fallback: escribir con printf para evitar problemas de comillas
+            printf '%s\n' \
+              "# AnyKernel3 config - GarnetKernel" \
+              "properties() { '" \
+              "kernel.string=GarnetKernel by Shammuray10 | KSU Next v3.2.0 + SUSFS v2.0.0" \
+              "do.devicecheck=1" \
+              "do.modules=0" \
+              "do.systemless=1" \
+              "do.cleanup=1" \
+              "do.cleanuponabort=0" \
+              "device.name1=garnet" \
+              "device.name2=parrot" \
+              "device.name3=2312DRA50G" \
+              "device.name4=Redmi Note 13 Pro 5G" \
+              "supported.versions=" \
+              "supported.patchlevels=" \
+              "'; }" \
+              "" \
+              "block=/dev/block/bootdevice/by-name/boot;" \
+              "is_slot_device=0;" \
+              "ramdisk_compression=auto;" \
+              "patch_vbmeta_flag=auto;" \
+              "" \
+              ". tools/ak3-core.sh;" \
+              ". tools/busybox sh;" \
+              "" \
+              "dump_boot;" \
+              "write_boot;" \
+              > anykernel/anykernel.sh
+            echo "anykernel.sh generado via printf"
+          fi
 
           # Crear ZIP
           TIMESTAMP=$(date +%Y%m%d-%H%M)
@@ -445,10 +452,10 @@ AKEOF
           echo "ZIPNAME=$ZIPNAME" >> $GITHUB_ENV
 
           cd anykernel
-          zip -r9 "../$ZIPNAME" . -x '*.git*' -x '*placeholder'
+          zip -r9 "../$ZIPNAME" . -x "*.git*" -x "*placeholder"
           cd ..
 
-          echo "✅ ZIP ready: $ZIPNAME"
+          echo "ZIP ready: $ZIPNAME"
           ls -lh "$ZIPNAME"
 
       # ────────────────────────────────────────────────────────
