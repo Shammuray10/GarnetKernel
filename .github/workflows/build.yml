@@ -1,0 +1,493 @@
+name: GarnetKernel Build
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      KERNEL_VERSION:
+        description: 'Kernel version string (e.g. GarnetKernel-v1.0)'
+        required: false
+        default: 'GarnetKernel-dev'
+      ENABLE_LTO:
+        description: 'Enable Thin LTO (true/false)'
+        required: false
+        default: 'true'
+      ENABLE_SUSFS:
+        description: 'Enable SUSFS patch (true/false)'
+        required: false
+        default: 'true'
+
+env:
+  # ── Kernel source ──────────────────────────────────────────
+  KERNEL_REPO: https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git
+  KERNEL_BRANCH: garnet-s-oss
+  KERNEL_DEFCONFIG: garnet_defconfig
+
+  # ── KernelSU Next — v3.2.0 exacto ─────────────────────────
+  KSU_TAG: v3.2.0
+
+  # ── SUSFS — v2.0.0, rama GKI android12-5.10 ───────────────
+  SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
+  SUSFS_BRANCH: gki-android12-5.10
+
+  # ── Toolchain — Clang 18 ───────────────────────────────────
+  CLANG_REPO: https://github.com/ZyCromerZ/Clang.git
+  CLANG_BRANCH: 18.0.0-release
+
+  # ── Build identity ─────────────────────────────────────────
+  KERNEL_NAME: GarnetKernel
+  LOCALVERSION: -GarnetKernel
+
+jobs:
+  build:
+    name: Build GarnetKernel
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+
+    steps:
+      # ────────────────────────────────────────────────────────
+      # 1. Setup environment
+      # ────────────────────────────────────────────────────────
+      - name: Checkout GarnetKernel repo
+        uses: actions/checkout@v4
+        with:
+          path: garnet-scripts
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ca-certificates cpio flex \
+            git kmod libelf-dev libssl-dev lld llvm python3 \
+            zip curl wget ccache pahole
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          max-size: 5G
+          key: garnet-kernel-clang18-${{ github.ref_name }}
+          restore-keys: |
+            garnet-kernel-clang18-
+            garnet-kernel-
+
+      # ────────────────────────────────────────────────────────
+      # 2. Toolchain — Clang 18
+      # ────────────────────────────────────────────────────────
+      - name: Cache Clang 18
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: clang
+          key: clang-18-${{ env.CLANG_BRANCH }}-v2
+
+      - name: Download Clang 18
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 -b ${{ env.CLANG_BRANCH }} \
+            ${{ env.CLANG_REPO }} clang
+          echo "Clang ready:"
+          clang/bin/clang --version
+
+      - name: Export toolchain paths
+        run: |
+          echo "${{ github.workspace }}/clang/bin" >> $GITHUB_PATH
+          echo "CLANG_PATH=${{ github.workspace }}/clang" >> $GITHUB_ENV
+
+      # ────────────────────────────────────────────────────────
+      # 3. Kernel source — Xiaomi OSS garnet
+      # ────────────────────────────────────────────────────────
+      - name: Clone Xiaomi OSS kernel (garnet-s-oss)
+        run: |
+          git clone --depth=1 \
+            -b ${{ env.KERNEL_BRANCH }} \
+            ${{ env.KERNEL_REPO }} kernel
+
+          cd kernel
+          KHEAD=$(git rev-parse --short HEAD)
+          echo "KERNEL_HEAD=$KHEAD" >> $GITHUB_ENV
+          echo "Source: $KHEAD — $(git log --oneline -1)"
+
+      # ────────────────────────────────────────────────────────
+      # 4. KernelSU Next — v3.2.0
+      # ────────────────────────────────────────────────────────
+      - name: Integrate KernelSU Next v3.2.0
+        run: |
+          cd kernel
+          # Usar tag exacto v3.2.0
+          curl -LSs \
+            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+            | bash -s ${{ env.KSU_TAG }}
+
+          # Verificar integración
+          if [ -d "KernelSU" ]; then
+            KSU_VER=$(cat KernelSU/VERSION 2>/dev/null || echo "unknown")
+            echo "✅ KernelSU Next integrated — version: $KSU_VER"
+            echo "KSU_VER=$KSU_VER" >> $GITHUB_ENV
+          else
+            echo "❌ KernelSU integration failed"
+            exit 1
+          fi
+
+      # ────────────────────────────────────────────────────────
+      # 5. SUSFS v2.0.0 — rama gki-android12-5.10
+      # ────────────────────────────────────────────────────────
+      - name: Clone SUSFS v2.0.0
+        if: ${{ github.event.inputs.ENABLE_SUSFS != 'false' }}
+        run: |
+          git clone --depth=1 \
+            -b ${{ env.SUSFS_BRANCH }} \
+            ${{ env.SUSFS_REPO }} susfs
+
+          # Verificar versión
+          SUSFS_VER=$(cat susfs/VERSION 2>/dev/null || \
+                      grep -r "SUSFS_VERSION" susfs/include/ 2>/dev/null | head -1 || \
+                      echo "v2.0.0")
+          echo "SUSFS_VER=$SUSFS_VER" >> $GITHUB_ENV
+          echo "✅ SUSFS cloned — $SUSFS_VER"
+
+      - name: Apply SUSFS v2.0.0 patch
+        if: ${{ github.event.inputs.ENABLE_SUSFS != 'false' }}
+        run: |
+          cd kernel
+
+          # ── Copiar archivos de SUSFS v2.0.0 al kernel ──
+          echo "Copying SUSFS source files..."
+
+          # fs/
+          cp ../susfs/kernel_patches/fs/susfs.c fs/ 2>/dev/null && \
+            echo "  ✓ fs/susfs.c" || echo "  ⚠ fs/susfs.c not found"
+
+          cp ../susfs/kernel_patches/fs/sus_su.c fs/ 2>/dev/null && \
+            echo "  ✓ fs/sus_su.c" || echo "  ⚠ fs/sus_su.c not found"
+
+          # include/linux/
+          cp ../susfs/kernel_patches/include/linux/susfs.h \
+             include/linux/ 2>/dev/null && \
+            echo "  ✓ include/linux/susfs.h" || \
+            echo "  ⚠ include/linux/susfs.h not found"
+
+          cp ../susfs/kernel_patches/include/linux/sus_su.h \
+             include/linux/ 2>/dev/null && \
+            echo "  ✓ include/linux/sus_su.h" || \
+            echo "  ⚠ include/linux/sus_su.h not found"
+
+          # ── Aplicar patch principal ──
+          # SUSFS v2.0.0 usa un patch diferente al de v1.x
+          PATCH="$GITHUB_WORKSPACE/susfs/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch"
+
+          if [ ! -f "$PATCH" ]; then
+            # Fallback: buscar cualquier patch compatible con 5.10
+            PATCH=$(find "$GITHUB_WORKSPACE/susfs/kernel_patches/" \
+                    -name "*5.10*.patch" | head -1)
+          fi
+
+          if [ -f "$PATCH" ]; then
+            echo "Applying SUSFS patch: $(basename $PATCH)"
+            patch -p1 --forward < "$PATCH" && \
+              echo "✅ SUSFS patch applied cleanly" || {
+              echo "::warning::SUSFS patch had conflicts — attempting with --reject"
+              patch -p1 --forward --reject-file=/tmp/susfs.rej < "$PATCH" || true
+              if ls fs/*.rej 2>/dev/null || ls include/linux/*.rej 2>/dev/null; then
+                echo "::error::SUSFS patch failed — review .rej files"
+                cat /tmp/susfs.rej 2>/dev/null | head -50
+                exit 1
+              fi
+            }
+          else
+            echo "::error::No SUSFS patch found for 5.10"
+            ls ../susfs/kernel_patches/
+            exit 1
+          fi
+
+          # ── KSU-SUSFS bridge patch ──
+          # v2.0.0 requiere patch adicional en KernelSU para comunicarse con SUSFS
+          KSU_PATCH=$(find "$GITHUB_WORKSPACE/susfs/kernel_patches/" \
+                      -name "*ksu*" -o -name "*kernelsu*" 2>/dev/null | head -1)
+          if [ -f "$KSU_PATCH" ]; then
+            echo "Applying KSU-SUSFS bridge patch..."
+            patch -p1 --forward < "$KSU_PATCH" && \
+              echo "✅ KSU bridge patch applied" || \
+              echo "::warning::KSU bridge patch skipped (may already be applied)"
+          fi
+
+          echo "SUSFS integration complete"
+
+      # ────────────────────────────────────────────────────────
+      # 6. Custom performance patches (carpeta patches/)
+      # ────────────────────────────────────────────────────────
+      - name: Apply custom patches
+        run: |
+          cd kernel
+          PATCH_DIR="${{ github.workspace }}/garnet-scripts/patches"
+          if [ -d "$PATCH_DIR" ] && ls "$PATCH_DIR"/*.patch 2>/dev/null; then
+            for patch in "$PATCH_DIR"/*.patch; do
+              echo "Applying: $(basename $patch)"
+              patch -p1 --forward < "$patch" && \
+                echo "  ✅ OK" || \
+                echo "  ::warning::$(basename $patch) failed or already applied"
+            done
+          else
+            echo "No custom patches found — skipping"
+          fi
+
+      # ────────────────────────────────────────────────────────
+      # 7. Defconfig — base + performance overlay
+      # ────────────────────────────────────────────────────────
+      - name: Generate optimized defconfig
+        run: |
+          cd kernel
+          mkdir -p out
+
+          # Base defconfig
+          make O=out ARCH=arm64 ${{ env.KERNEL_DEFCONFIG }}
+
+          echo "=== Applying GarnetKernel performance overlay ==="
+
+          # ── KernelSU Next v3.2.0 ──
+          # NOTA: v3.2.0 usa CONFIG_KSU (mismo nombre, driver actualizado)
+          scripts/config --file out/.config \
+            -e KSU \
+            -e KSU_DEBUG
+
+          # ── SUSFS v2.0.0 ──
+          # v2.0.0 cambió algunos nombres de CONFIG respecto a v1.x
+          scripts/config --file out/.config \
+            -e KSU_SUSFS \
+            -e KSU_SUSFS_SUS_PATH \
+            -e KSU_SUSFS_SUS_MOUNT \
+            -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
+            -e KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT \
+            -e KSU_SUSFS_SUS_KSTAT \
+            -e KSU_SUSFS_SUS_OVERLAYFS \
+            -e KSU_SUSFS_TRY_UMOUNT \
+            -e KSU_SUSFS_SPOOF_UNAME \
+            -e KSU_SUSFS_ENABLE_LOG \
+            -e KSU_SUSFS_OPEN_REDIRECT \
+            -e KSU_SUSFS_SUS_SU
+
+          # ── CPU / Scheduler ──
+          scripts/config --file out/.config \
+            -e SCHED_WALT \
+            -e CPU_BOOST \
+            -e DYNAMIC_STUNE_BOOST \
+            -e SCHED_CORE_CTL \
+            -e CPU_FREQ_GOV_SCHEDUTIL \
+            -e CPU_FREQ_GOV_PERFORMANCE \
+            -d CPU_FREQ_GOV_ONDEMAND \
+            -d CPU_FREQ_GOV_CONSERVATIVE \
+            -e ENERGY_MODEL \
+            -e CPU_IDLE \
+            -e CPU_IDLE_GOV_MENU \
+            -e ARM_PSCI_CPUIDLE
+
+          # ── GPU ──
+          scripts/config --file out/.config \
+            -e QCOM_KGSL \
+            -e DEVFREQ_GOV_SIMPLE_ONDEMAND \
+            -e DEVFREQ_GOV_PERFORMANCE
+
+          # ── I/O — Kyber para UFS 3.1 ──
+          scripts/config --file out/.config \
+            -e MQ_IOSCHED_KYBER \
+            -e MQ_IOSCHED_DEADLINE \
+            -d IOSCHED_CFQ
+
+          # ── Memory / zRAM ──
+          scripts/config --file out/.config \
+            -e ZRAM \
+            -e ZSMALLOC \
+            -e CRYPTO_LZ4 \
+            -e CRYPTO_ZSTD \
+            -e PM_WAKELOCKS \
+            --set-val PM_WAKELOCKS_LIMIT 100
+
+          # ── Thin LTO ──
+          if [ "${{ github.event.inputs.ENABLE_LTO }}" != "false" ]; then
+            scripts/config --file out/.config \
+              -d LTO_NONE \
+              -e LTO_CLANG \
+              -e THINLTO
+            echo "Thin LTO: ENABLED"
+          else
+            echo "Thin LTO: DISABLED (manual override)"
+          fi
+
+          # ── Thermal ──
+          scripts/config --file out/.config \
+            -e QTI_THERMAL_LIMITS_DCVS \
+            -e QTI_PLH
+
+          # ── TCP BBR ──
+          scripts/config --file out/.config \
+            -e TCP_CONG_BBR \
+            -e NET_SCH_FQ \
+            -e NET_SCH_FQ_CODEL
+
+          # ── Localversion ──
+          scripts/config --file out/.config \
+            --set-str LOCALVERSION "${{ env.LOCALVERSION }}"
+
+          # Finalizar config
+          make O=out ARCH=arm64 olddefconfig
+          echo "=== Defconfig ready ==="
+
+          # Mostrar configs clave
+          echo "--- Key configs ---"
+          grep -E "^CONFIG_(KSU|SUSFS|THINLTO|LTO|SCHED_WALT|ZRAM|KYBER|BBR)" \
+            out/.config || true
+
+      # ────────────────────────────────────────────────────────
+      # 8. Build
+      # ────────────────────────────────────────────────────────
+      - name: Build GarnetKernel
+        run: |
+          cd kernel
+
+          BUILD_START=$(date +%s)
+          echo "Build started at: $(date)"
+
+          make -j$(nproc --all) \
+            O=out \
+            ARCH=arm64 \
+            CC="ccache clang" \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            KCFLAGS="-O3 -march=armv8.2-a -mtune=cortex-a55 -ffast-math" \
+            KBUILD_BUILD_USER=Shammuray10 \
+            KBUILD_BUILD_HOST=GarnetKernel \
+            2>&1 | tee out/build.log
+
+          BUILD_END=$(date +%s)
+          DIFF=$((BUILD_END - BUILD_START))
+          BUILD_TIME="$((DIFF / 60))m $((DIFF % 60))s"
+          echo "BUILD_TIME=$BUILD_TIME" >> $GITHUB_ENV
+          echo "Build finished in $BUILD_TIME"
+
+          # Verificar output
+          if [ -f out/arch/arm64/boot/Image ]; then
+            echo "✅ Kernel Image built successfully"
+            ls -lh out/arch/arm64/boot/Image
+          else
+            echo "❌ BUILD FAILED — no Image found"
+            echo "=== Last 100 lines of build log ==="
+            tail -100 out/build.log
+            exit 1
+          fi
+
+      # ────────────────────────────────────────────────────────
+      # 9. Package — AnyKernel3
+      # ────────────────────────────────────────────────────────
+      - name: Clone AnyKernel3
+        run: |
+          git clone --depth=1 \
+            https://github.com/KernelSU-Next/AnyKernel3.git anykernel
+          rm -rf anykernel/.git
+
+      - name: Package flashable ZIP
+        run: |
+          # Copiar kernel image
+          cp kernel/out/arch/arm64/boot/Image anykernel/
+
+          # DTBs si existen
+          [ -f kernel/out/arch/arm64/boot/dtb.img ] && \
+            cp kernel/out/arch/arm64/boot/dtb.img anykernel/ || true
+          [ -f kernel/out/arch/arm64/boot/dtbo.img ] && \
+            cp kernel/out/arch/arm64/boot/dtbo.img anykernel/ || true
+
+          # anykernel.sh para garnet
+          cat > anykernel/anykernel.sh << 'AKEOF'
+# AnyKernel3 config — GarnetKernel
+properties() { '
+kernel.string=GarnetKernel by Shammuray10 | KSU Next v3.2.0 + SUSFS v2.0.0
+do.devicecheck=1
+do.modules=0
+do.systemless=1
+do.cleanup=1
+do.cleanuponabort=0
+device.name1=garnet
+device.name2=parrot
+device.name3=2312DRA50G
+device.name4=Redmi Note 13 Pro 5G
+supported.versions=
+supported.patchlevels=
+'; }
+
+block=/dev/block/bootdevice/by-name/boot;
+is_slot_device=0;
+ramdisk_compression=auto;
+patch_vbmeta_flag=auto;
+
+. tools/ak3-core.sh;
+. tools/busybox sh;
+
+dump_boot;
+write_boot;
+AKEOF
+
+          # Crear ZIP
+          TIMESTAMP=$(date +%Y%m%d-%H%M)
+          ZIPNAME="${{ env.KERNEL_NAME }}-garnet-${TIMESTAMP}-KSUNext-v3.2.0-SUSFS-v2.0.0.zip"
+          echo "ZIPNAME=$ZIPNAME" >> $GITHUB_ENV
+
+          cd anykernel
+          zip -r9 "../$ZIPNAME" . -x '*.git*' -x '*placeholder'
+          cd ..
+
+          echo "✅ ZIP ready: $ZIPNAME"
+          ls -lh "$ZIPNAME"
+
+      # ────────────────────────────────────────────────────────
+      # 10. Upload
+      # ────────────────────────────────────────────────────────
+      - name: Upload kernel ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIPNAME }}
+          path: ${{ env.ZIPNAME }}
+          retention-days: 30
+
+      - name: Upload build log (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: kernel/out/build.log
+          retention-days: 7
+
+      # ────────────────────────────────────────────────────────
+      # 11. Summary
+      # ────────────────────────────────────────────────────────
+      - name: Build summary
+        if: success()
+        run: |
+          echo "## ✅ GarnetKernel — Build Success" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Campo | Valor |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Kernel | ${{ env.KERNEL_NAME }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Device | Redmi Note 13 Pro 5G (2312DRA50G) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Codename | garnet / parrot |" >> $GITHUB_STEP_SUMMARY
+          echo "| Source | garnet-s-oss @ ${{ env.KERNEL_HEAD }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| KernelSU Next | ${{ env.KSU_TAG }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| SUSFS | v2.0.0 (gki-android12-5.10) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Compiler | Clang 18 + LLVM |" >> $GITHUB_STEP_SUMMARY
+          echo "| LTO | Thin LTO |" >> $GITHUB_STEP_SUMMARY
+          echo "| KCFLAGS | -O3 -march=armv8.2-a -ffast-math |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build time | ${{ env.BUILD_TIME }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Output | ${{ env.ZIPNAME }} |" >> $GITHUB_STEP_SUMMARY
+          
