@@ -36,9 +36,8 @@ env:
   SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
   SUSFS_BRANCH: gki-android12-5.10
 
-  # ── Toolchain — Clang 18 ───────────────────────────────────
-  CLANG_REPO: https://github.com/ZyCromerZ/Clang.git
-  CLANG_BRANCH: 18.0.0-release
+  # ── Toolchain — Neutron Clang 18 (tarball directo) ────────
+  CLANG_URL: https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/09012023/neutron-clang-09012023.tar.zst
 
   # ── Build identity ─────────────────────────────────────────
   KERNEL_NAME: GarnetKernel
@@ -65,7 +64,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             bc bison build-essential ca-certificates cpio flex \
             git kmod libelf-dev libssl-dev lld llvm python3 \
-            zip curl wget ccache pahole
+            zip curl wget ccache pahole zstd
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -84,13 +83,20 @@ jobs:
         uses: actions/cache@v4
         with:
           path: clang
-          key: clang-18-${{ env.CLANG_BRANCH }}-v2
+          key: neutron-clang-18-09012023-v1
 
-      - name: Download Clang 18
+      - name: Download Neutron Clang 18
         if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
-          git clone --depth=1 -b ${{ env.CLANG_BRANCH }} \
-            ${{ env.CLANG_REPO }} clang
+          mkdir -p clang
+          echo "Downloading Neutron Clang 18..."
+          wget -q --show-progress \
+            "${{ env.CLANG_URL }}" \
+            -O neutron-clang.tar.zst
+          echo "Extracting..."
+          tar --use-compress-program=unzstd \
+            -xf neutron-clang.tar.zst -C clang
+          rm neutron-clang.tar.zst
           echo "Clang ready:"
           clang/bin/clang --version
 
