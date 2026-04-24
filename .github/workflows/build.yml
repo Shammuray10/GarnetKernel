@@ -36,8 +36,8 @@ env:
   SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
   SUSFS_BRANCH: gki-android12-5.10
 
-  # ── Toolchain — Neutron Clang 18 (tarball directo) ────────
-  CLANG_URL: https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/09012023/neutron-clang-09012023.tar.zst
+  # ── Toolchain — Neutron Clang via antman ──────────────────
+  CLANG_DIR: /home/runner/neutron-clang
 
   # ── Build identity ─────────────────────────────────────────
   KERNEL_NAME: GarnetKernel
@@ -78,32 +78,29 @@ jobs:
       # ────────────────────────────────────────────────────────
       # 2. Toolchain — Clang 18
       # ────────────────────────────────────────────────────────
-      - name: Cache Clang 18
+      - name: Cache Neutron Clang
         id: cache-clang
         uses: actions/cache@v4
         with:
-          path: clang
-          key: neutron-clang-18-09012023-v1
+          path: /home/runner/neutron-clang
+          key: neutron-clang-antman-latest-v1
 
-      - name: Download Neutron Clang 18
+      - name: Download Neutron Clang via antman
         if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
-          mkdir -p clang
-          echo "Downloading Neutron Clang 18..."
-          wget -q --show-progress \
-            "${{ env.CLANG_URL }}" \
-            -O neutron-clang.tar.zst
-          echo "Extracting..."
-          tar --use-compress-program=unzstd \
-            -xf neutron-clang.tar.zst -C clang
-          rm neutron-clang.tar.zst
+          mkdir -p ${{ env.CLANG_DIR }}
+          cd ${{ env.CLANG_DIR }}
+          curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+          chmod +x antman
+          ./antman -S=latest
+          ./antman --patch=glibc
           echo "Clang ready:"
-          clang/bin/clang --version
+          ${{ env.CLANG_DIR }}/bin/clang --version
 
       - name: Export toolchain paths
         run: |
-          echo "${{ github.workspace }}/clang/bin" >> $GITHUB_PATH
-          echo "CLANG_PATH=${{ github.workspace }}/clang" >> $GITHUB_ENV
+          echo "${{ env.CLANG_DIR }}/bin" >> $GITHUB_PATH
+          echo "CLANG_PATH=${{ env.CLANG_DIR }}" >> $GITHUB_ENV
 
       # ────────────────────────────────────────────────────────
       # 3. Kernel source — Xiaomi OSS garnet
