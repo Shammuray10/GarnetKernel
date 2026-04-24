@@ -390,7 +390,7 @@ jobs:
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
             LLVM=1 \
             LLVM_IAS=1 \
-            KCFLAGS="-O3 -march=armv8.2-a -mtune=cortex-a55 -ffast-math" \
+            KCFLAGS="-O3 -march=armv8.2-a -mtune=cortex-a55" \
             KBUILD_BUILD_USER=Shammuray10 \
             KBUILD_BUILD_HOST=GarnetKernel \
             2>&1 | tee out/build.log
