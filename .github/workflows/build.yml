@@ -355,8 +355,9 @@ jobs:
           scripts/config --file out/.config \
             --set-str LOCALVERSION "${{ env.LOCALVERSION }}"
 
-          # Finalizar config
-          make O=out ARCH=arm64 olddefconfig
+          # Finalizar config — yes responde automaticamente a opciones nuevas
+          make O=out ARCH=arm64 olddefconfig < /dev/null 2>/dev/null || \
+          yes "" | make O=out ARCH=arm64 oldconfig
           echo "=== Defconfig ready ==="
 
           # Mostrar configs clave
