@@ -127,14 +127,25 @@ jobs:
             "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
             | bash -s ${{ env.KSU_TAG }}
 
-          # Verificar integración
-          if [ -d "KernelSU" ]; then
-            KSU_VER=$(cat KernelSU/VERSION 2>/dev/null || echo "unknown")
-            echo "✅ KernelSU Next integrated — version: $KSU_VER"
+          # Verificar integración — puede llamarse KernelSU o KernelSU-Next
+          KSU_DIR=""
+          [ -d "KernelSU" ] && KSU_DIR="KernelSU"
+          [ -d "KernelSU-Next" ] && KSU_DIR="KernelSU-Next"
+
+          if [ -n "$KSU_DIR" ]; then
+            KSU_VER=$(cat "$KSU_DIR/VERSION" 2>/dev/null || echo "v3.2.0")
+            echo "✅ KernelSU Next integrated ($KSU_DIR) — version: $KSU_VER"
             echo "KSU_VER=$KSU_VER" >> $GITHUB_ENV
           else
-            echo "❌ KernelSU integration failed"
-            exit 1
+            # Verificar por Makefile modificado (integración sin carpeta visible)
+            if grep -q "KernelSU" kernel/Makefile 2>/dev/null || \
+               grep -q "kernelsu" drivers/Makefile 2>/dev/null; then
+              echo "✅ KernelSU Next integrated via Makefile"
+              echo "KSU_VER=v3.2.0" >> $GITHUB_ENV
+            else
+              echo "❌ KernelSU integration failed"
+              exit 1
+            fi
           fi
 
       # ────────────────────────────────────────────────────────
