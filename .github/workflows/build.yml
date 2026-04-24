@@ -46,7 +46,7 @@ env:
 jobs:
   build:
     name: Build GarnetKernel
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 150
 
     steps:
@@ -93,7 +93,6 @@ jobs:
           curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
           chmod +x antman
           ./antman -S=latest
-          ./antman --patch=glibc
           echo "Clang ready:"
           ${{ env.CLANG_DIR }}/bin/clang --version
 
