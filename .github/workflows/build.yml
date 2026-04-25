@@ -115,10 +115,38 @@ jobs:
           echo "KERNEL_HEAD=$KHEAD" >> $GITHUB_ENV
           echo "Source: $KHEAD — $(git log --oneline -1)"
 
-          # Crear archivo Kconfig faltante para hwid
-          mkdir -p drivers/misc/hwid
-          touch drivers/misc/hwid/Kconfig
-          echo "# hwid placeholder" > drivers/misc/hwid/Kconfig
+          # Crear Kconfigs faltantes de drivers propietarios Xiaomi
+          # garnet-t-oss referencia drivers que no están en el repo público
+          MISSING_DRIVERS="
+            drivers/misc/hwid
+            drivers/misc/plaid
+            drivers/misc/mi_memory
+            drivers/misc/nt36xxx
+            drivers/misc/xiaomi
+            drivers/input/misc/vl53l8
+            drivers/nfc/nxp
+            drivers/soc/qcom/boot_stats
+          "
+          for d in $MISSING_DRIVERS; do
+            if [ ! -f "$d/Kconfig" ]; then
+              mkdir -p "$d"
+              echo "# Placeholder for proprietary driver" > "$d/Kconfig"
+              echo "Created placeholder: $d/Kconfig"
+            fi
+          done
+
+          # Scan y crear cualquier otro Kconfig faltante automáticamente
+          for attempt in 1 2 3 4 5; do
+            MISSING=$(make O=out ARCH=arm64 garnet_defconfig 2>&1 | \
+              grep "can't open file" | \
+              sed "s/.*can't open file \"//;s/\".*//")
+            [ -z "$MISSING" ] && break
+            for f in $MISSING; do
+              mkdir -p "$(dirname $f)"
+              echo "# Placeholder" > "$f"
+              echo "Created: $f"
+            done
+          done
 
       # ────────────────────────────────────────────────────────
       # 4. KernelSU Next — v3.2.0
