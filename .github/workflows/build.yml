@@ -290,34 +290,32 @@ jobs:
           cd kernel
           mkdir -p out
 
-          # Detectar defconfig disponible
-          echo "=== Defconfigs disponibles ==="
-          find arch/arm64/configs/ -name "*garnet*" -o -name "*parrot*" \
-            -o -name "*crow*" -o -name "*sm7435*" 2>/dev/null | sort
-          echo "=== Todos los defconfigs arm64 ==="
-          ls arch/arm64/configs/ | head -30
+          echo "=== Generando defconfig para garnet-t-oss ==="
 
-          # Seleccionar el defconfig correcto automáticamente
-          DEFCONFIG=""
-          for candidate in garnet_defconfig parrot_defconfig \
-                           vendor/garnet_defconfig vendor/parrot_defconfig \
-                           garnet-perf_defconfig crow_defconfig; do
-            if [ -f "arch/arm64/configs/$candidate" ]; then
-              DEFCONFIG="$candidate"
-              echo "✅ Usando defconfig: $DEFCONFIG"
-              break
-            fi
-          done
+          # garnet-t-oss usa GKI base + fragments
+          # Base: arch/arm64/configs/defconfig (GKI)
+          # Fragment: arch/arm64/configs/vendor/garnet_consolidate.config
+          make O=out ARCH=arm64 defconfig
 
-          if [ -z "$DEFCONFIG" ]; then
-            echo "❌ No se encontró defconfig para garnet"
-            echo "Defconfigs disponibles:"
-            ls arch/arm64/configs/
-            exit 1
+          # Merge fragment garnet_consolidate (drivers Xiaomi específicos)
+          if [ -f "arch/arm64/configs/vendor/garnet_consolidate.config" ]; then
+            echo "Merging garnet_consolidate.config..."
+            KCONFIG_CONFIG=out/.config \
+              scripts/kconfig/merge_config.sh -m \
+              out/.config \
+              arch/arm64/configs/vendor/garnet_consolidate.config
+            echo "✅ garnet_consolidate merged"
           fi
 
-          # Base defconfig
-          make O=out ARCH=arm64 $DEFCONFIG
+          # Merge fragment garnet_GKI si existe
+          if [ -f "arch/arm64/configs/vendor/garnet_GKI.config" ]; then
+            echo "Merging garnet_GKI.config..."
+            KCONFIG_CONFIG=out/.config \
+              scripts/kconfig/merge_config.sh -m \
+              out/.config \
+              arch/arm64/configs/vendor/garnet_GKI.config
+            echo "✅ garnet_GKI merged"
+          fi
 
           echo "=== Applying GarnetKernel performance overlay ==="
 
@@ -535,5 +533,4 @@ jobs:
           echo "| Compiler | Clang 18 + LLVM |" >> $GITHUB_STEP_SUMMARY
           echo "| LTO | Thin LTO |" >> $GITHUB_STEP_SUMMARY
           echo "| KCFLAGS | -O3 -march=armv8.2-a -ffast-math |" >> $GITHUB_STEP_SUMMARY
-          echo "| Build time | ${{ env.BUILD_TIME }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Output 
+          echo "| Build time | ${{ env.BUILD_TIME }} |" >> $GITHUB
