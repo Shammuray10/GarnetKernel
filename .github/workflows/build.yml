@@ -104,7 +104,7 @@ jobs:
       # ────────────────────────────────────────────────────────
       # 3. Kernel source — Xiaomi OSS garnet
       # ────────────────────────────────────────────────────────
-      - name: Clone Xiaomi OSS kernel (garnet-s-oss)
+      - name: Clone Xiaomi OSS kernel (garnet-t-oss)
         run: |
           git clone --depth=1 \
             -b ${{ env.KERNEL_BRANCH }} \
@@ -114,6 +114,11 @@ jobs:
           KHEAD=$(git rev-parse --short HEAD)
           echo "KERNEL_HEAD=$KHEAD" >> $GITHUB_ENV
           echo "Source: $KHEAD — $(git log --oneline -1)"
+
+          # Crear archivo Kconfig faltante para hwid
+          mkdir -p drivers/misc/hwid
+          touch drivers/misc/hwid/Kconfig
+          echo "# hwid placeholder" > drivers/misc/hwid/Kconfig
 
       # ────────────────────────────────────────────────────────
       # 4. KernelSU Next — v3.2.0
