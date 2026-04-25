@@ -24,10 +24,10 @@ on:
         default: 'true'
 
 env:
-  # ── Kernel source — GKI android12-5.10 (Google oficial) ───
-  KERNEL_REPO: https://android.googlesource.com/kernel/common
-  KERNEL_BRANCH: android12-5.10
-  KERNEL_DEFCONFIG: gki_defconfig
+  # ── Kernel source — Xiaomi OSS garnet ────────────────────
+  KERNEL_REPO: https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git
+  KERNEL_BRANCH: garnet-t-oss
+  KERNEL_DEFCONFIG: garnet_defconfig
 
   # ── KernelSU Next — v3.2.0 exacto ─────────────────────────
   KSU_TAG: v3.2.0
@@ -257,17 +257,8 @@ jobs:
           cd kernel
           mkdir -p out
 
-          # ── GKI base defconfig ──
+          # Base defconfig Xiaomi garnet
           make O=out ARCH=arm64 ${{ env.KERNEL_DEFCONFIG }}
-
-          # ── Aplicar fragment de garnet si existe ──
-          for frag in arch/arm64/configs/vendor/garnet*.config \
-                      arch/arm64/configs/garnet*.config; do
-            [ -f "$frag" ] && \
-              KCONFIG_CONFIG=out/.config scripts/kconfig/merge_config.sh \
-                -m out/.config "$frag" && \
-              echo "Applied fragment: $frag" || true
-          done
 
           echo "=== Applying GarnetKernel performance overlay ==="
 
