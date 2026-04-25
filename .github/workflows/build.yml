@@ -24,10 +24,12 @@ on:
         default: 'true'
 
 env:
-  # ── Kernel source — Xiaomi OSS garnet ────────────────────
-  KERNEL_REPO: https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git
-  KERNEL_BRANCH: garnet-t-oss
-  KERNEL_DEFCONFIG: garnet_defconfig
+  # ── Kernel source — GKI android12-5.10 (Google oficial) ───
+  # garnet-t-oss es incompatible con toolchain externo (android_vendor_data1)
+  # GKI es la base correcta para HyperOS 3 / Android 16
+  KERNEL_REPO: https://android.googlesource.com/kernel/common
+  KERNEL_BRANCH: android12-5.10
+  KERNEL_DEFCONFIG: gki_defconfig
 
   # ── KernelSU Next — v3.2.0 exacto ─────────────────────────
   KSU_TAG: v3.2.0
@@ -104,7 +106,7 @@ jobs:
       # ────────────────────────────────────────────────────────
       # 3. Kernel source — Xiaomi OSS garnet
       # ────────────────────────────────────────────────────────
-      - name: Clone Xiaomi OSS kernel (garnet-t-oss)
+      - name: Clone kernel source (GKI android12-5.10)
         run: |
           git clone --depth=1 \
             -b ${{ env.KERNEL_BRANCH }} \
@@ -114,39 +116,6 @@ jobs:
           KHEAD=$(git rev-parse --short HEAD)
           echo "KERNEL_HEAD=$KHEAD" >> $GITHUB_ENV
           echo "Source: $KHEAD — $(git log --oneline -1)"
-
-          # Crear Kconfigs faltantes de drivers propietarios Xiaomi
-          # garnet-t-oss referencia drivers que no están en el repo público
-          MISSING_DRIVERS="
-            drivers/misc/hwid
-            drivers/misc/plaid
-            drivers/misc/mi_memory
-            drivers/misc/nt36xxx
-            drivers/misc/xiaomi
-            drivers/input/misc/vl53l8
-            drivers/nfc/nxp
-            drivers/soc/qcom/boot_stats
-          "
-          for d in $MISSING_DRIVERS; do
-            if [ ! -f "$d/Kconfig" ]; then
-              mkdir -p "$d"
-              echo "# Placeholder for proprietary driver" > "$d/Kconfig"
-              echo "Created placeholder: $d/Kconfig"
-            fi
-          done
-
-          # Scan y crear cualquier otro Kconfig faltante automáticamente
-          for attempt in 1 2 3 4 5; do
-            MISSING=$(make O=out ARCH=arm64 garnet_defconfig 2>&1 | \
-              grep "can't open file" | \
-              sed "s/.*can't open file \"//;s/\".*//")
-            [ -z "$MISSING" ] && break
-            for f in $MISSING; do
-              mkdir -p "$(dirname $f)"
-              echo "# Placeholder" > "$f"
-              echo "Created: $f"
-            done
-          done
 
       # ────────────────────────────────────────────────────────
       # 4. KernelSU Next — v3.2.0
@@ -290,32 +259,10 @@ jobs:
           cd kernel
           mkdir -p out
 
-          echo "=== Generando defconfig para garnet-t-oss ==="
+          echo "=== Generando defconfig GKI para garnet ==="
 
-          # garnet-t-oss usa GKI base + fragments
-          # Base: arch/arm64/configs/defconfig (GKI)
-          # Fragment: arch/arm64/configs/vendor/garnet_consolidate.config
-          make O=out ARCH=arm64 defconfig
-
-          # Merge fragment garnet_consolidate (drivers Xiaomi específicos)
-          if [ -f "arch/arm64/configs/vendor/garnet_consolidate.config" ]; then
-            echo "Merging garnet_consolidate.config..."
-            KCONFIG_CONFIG=out/.config \
-              scripts/kconfig/merge_config.sh -m \
-              out/.config \
-              arch/arm64/configs/vendor/garnet_consolidate.config
-            echo "✅ garnet_consolidate merged"
-          fi
-
-          # Merge fragment garnet_GKI si existe
-          if [ -f "arch/arm64/configs/vendor/garnet_GKI.config" ]; then
-            echo "Merging garnet_GKI.config..."
-            KCONFIG_CONFIG=out/.config \
-              scripts/kconfig/merge_config.sh -m \
-              out/.config \
-              arch/arm64/configs/vendor/garnet_GKI.config
-            echo "✅ garnet_GKI merged"
-          fi
+          # Base GKI defconfig
+          make O=out ARCH=arm64 ${{ env.KERNEL_DEFCONFIG }}
 
           echo "=== Applying GarnetKernel performance overlay ==="
 
@@ -533,4 +480,6 @@ jobs:
           echo "| Compiler | Clang 18 + LLVM |" >> $GITHUB_STEP_SUMMARY
           echo "| LTO | Thin LTO |" >> $GITHUB_STEP_SUMMARY
           echo "| KCFLAGS | -O3 -march=armv8.2-a -ffast-math |" >> $GITHUB_STEP_SUMMARY
-          echo "| Build time | ${{ env.BUILD_TIME }} |" >> $GITHUB
+          echo "| Build time | ${{ env.BUILD_TIME }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Output | ${{ env.ZIPNAME }} |" >> $GITHUB_STEP_SUMMARY
+          
