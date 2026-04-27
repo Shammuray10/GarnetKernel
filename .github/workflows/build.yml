@@ -37,8 +37,6 @@ env:
   # NUNCA usar android12-5.10 GKI puro → bootloop garantizado en garnet
   KERNEL_REPO:      https://github.com/MiCode/Xiaomi_Kernel_OpenSource
   KERNEL_BRANCH:    garnet-t-oss
-  KERNEL_DEFCONFIG: vendor/lahaina-qgki_defconfig
-
   # ── KernelSU Next ─────────────────────────────────────────
   KSU_REPO:   https://github.com/KernelSU-Next/KernelSU-Next
   KSU_TAG:    v3.2.0
@@ -138,24 +136,13 @@ jobs:
           echo "KERNEL_HEAD=$KHEAD" >> $GITHUB_ENV
           echo "✅ Source: $KHEAD — $(git log --oneline -1)"
 
-          # Detectar defconfig real (vendor/ o raíz)
-          if [ -f "arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}" ]; then
-            echo "✅ Defconfig encontrado: ${{ env.KERNEL_DEFCONFIG }}"
-            echo "FINAL_DEFCONFIG=${{ env.KERNEL_DEFCONFIG }}" >> $GITHUB_ENV
+          # garnet-t-oss usa gki_defconfig + vendor/garnet_GKI.config (fragment)
+          FRAGMENT="arch/arm64/configs/vendor/garnet_GKI.config"
+          if [ -f "$FRAGMENT" ]; then
+            echo "✅ Config fragment encontrado: $FRAGMENT"
           else
-            echo "⚠ Buscando defconfig alternativo..."
-            FOUND=$(find arch/arm64/configs/ -name "*lahaina*qgki*" \
-                    -o -name "*garnet*" 2>/dev/null | head -1)
-            if [ -n "$FOUND" ]; then
-              # Convertir a path relativo desde arch/arm64/configs/
-              REL=$(echo "$FOUND" | sed 's|arch/arm64/configs/||')
-              echo "✅ Usando: $REL"
-              echo "FINAL_DEFCONFIG=$REL" >> $GITHUB_ENV
-            else
-              echo "❌ No se encontró defconfig compatible"
-              find arch/arm64/configs/ -name "*.config" -o -name "*defconfig" | head -20
-              exit 1
-            fi
+            echo "⚠ Fragment no encontrado — listando configs disponibles:"
+            find arch/arm64/configs/ -name "*.config" | head -20
           fi
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -286,18 +273,41 @@ jobs:
           fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-# STEP 8 — DEFCONFIG: performance + battery + security
+# STEP 8 — DEFCONFIG: gki_defconfig + garnet_GKI.config fragment
 # ═════════════════════════════════════════════════════════════════════════════
       - name: Generate GarnetKernel defconfig
         run: |
           cd kernel
           mkdir -p out
 
-          DEFCONFIG="${{ env.FINAL_DEFCONFIG }}"
-          echo "=== Base defconfig: $DEFCONFIG ==="
-          make O=out ARCH=arm64 $DEFCONFIG
+          # garnet-t-oss usa un sistema de 2 capas:
+          # 1. gki_defconfig  — base GKI mínima (siempre presente)
+          # 2. vendor/garnet_GKI.config — fragment con drivers Xiaomi/Qualcomm
+          # vendor/garnet_GKI.config es un .config FRAGMENT, no un defconfig
+          # completo → NO se puede usar con "make X_defconfig" directamente
+          # Se fusiona con merge_config.sh
+
+          echo "=== Paso 1: base gki_defconfig ==="
+          make O=out ARCH=arm64 gki_defconfig
+
+          echo "=== Paso 2: merge vendor/garnet_GKI.config ==="
+          FRAGMENT="arch/arm64/configs/vendor/garnet_GKI.config"
+          if [ ! -f "$FRAGMENT" ]; then
+            echo "❌ Fragment no encontrado: $FRAGMENT"
+            echo "Fragmentos disponibles:"
+            find arch/arm64/configs/vendor/ -name "*.config" | head -20
+            exit 1
+          fi
+          ./scripts/kconfig/merge_config.sh -m -O out out/.config "$FRAGMENT"
+          echo "✅ garnet_GKI.config merged"
+
+          echo "=== Paso 3: olddefconfig para resolver dependencias ==="
+          make O=out ARCH=arm64 olddefconfig
+
+          echo "=== Applying GarnetKernel overlay ==="
 
           # ── KernelSU Next (non-GKI: sin kprobes) ──────────────────
+          # kprobes en kernels non-GKI causa kernel panic al boot
           scripts/config --file out/.config \
             -e KSU \
             -e KSU_DEBUG \
@@ -321,7 +331,7 @@ jobs:
             -e KSU_SUSFS_SUS_SU
 
           # ── CPU Scheduler: WALT + EAS + uclamp ────────────────────
-          # WALT: scheduler Qualcomm para big.LITTLE (A78+A55)
+          # WALT: scheduler Qualcomm optimizado para big.LITTLE (A78+A55)
           # uclamp: permite fijar min/max utilización por task (gaming boost)
           scripts/config --file out/.config \
             -e SCHED_WALT \
@@ -347,13 +357,12 @@ jobs:
             -e DEVFREQ_GOV_PERFORMANCE
 
           # ── I/O: Kyber para UFS 3.1 ───────────────────────────────
-          # Kyber: scheduler multiqueue de baja latencia, ideal para UFS 3.1
           scripts/config --file out/.config \
             -e MQ_IOSCHED_KYBER \
             -e MQ_IOSCHED_DEADLINE \
             -d IOSCHED_CFQ
 
-          # ── Memory: zRAM con zstd ──────────────────────────────────
+          # ── Memory: zRAM zstd ──────────────────────────────────────
           scripts/config --file out/.config \
             -e ZRAM \
             -e ZSMALLOC \
@@ -385,7 +394,6 @@ jobs:
           fi
 
           # ── Security: Play Integrity / SafetyNet ──────────────────
-          # Evitar detecciones de root en apps bancarias, etc.
           scripts/config --file out/.config \
             -e SECURITY \
             -e SECURITY_SELINUX \
@@ -398,9 +406,8 @@ jobs:
           scripts/config --file out/.config \
             --set-str LOCALVERSION "-GarnetKernel"
 
-          # Finalizar config
-          yes "" | make O=out ARCH=arm64 oldconfig 2>/dev/null || \
-            make O=out ARCH=arm64 olddefconfig
+          # Finalizar — resolver dependencias del overlay
+          make O=out ARCH=arm64 olddefconfig
 
           echo "=== Key configs ==="
           grep -E "^CONFIG_(KSU|SUSFS|THINLTO|LTO|SCHED_WALT|UCLAMP|ZRAM|KYBER|BBR|KPROBES)" \
@@ -486,12 +493,4 @@ jobs:
             -e CPU_IDLE_GOV_LADDER
 
           yes "" | make O=out ARCH=arm64 oldconfig 2>/dev/null || \
-            make O=out ARCH=arm64 olddefconfig
-
-      - name: Build GarnetKernel — Battery variant
-        if: github.event.inputs.BUILD_VARIANT == 'battery' || github.event.inputs.BUILD_VARIANT == 'both' || github.event.inputs.BUILD_VARIANT == ''
-        run: |
-          cd kernel
-          BUILD_START=$(date +%s)
-
-          mak
+     
