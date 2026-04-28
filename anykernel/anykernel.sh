@@ -1,5 +1,5 @@
 ### AnyKernel3 Ramdisk Mod Script
-## GarnetKernel by Shammuray10
+## osm0sis @ xda-developers
 
 ### AnyKernel setup
 properties() { '
@@ -9,10 +9,11 @@ do.modules=0
 do.systemless=0
 do.cleanup=1
 do.cleanuponabort=0
-device.name1=garnet
-device.name2=parrot
-device.name3=2312DRA50G
-device.name4=Redmi Note 13 Pro 5G
+device.name1=
+device.name2=
+device.name3=
+device.name4=
+device.name5=
 supported.versions=
 supported.patchlevels=
 supported.vendorpatchlevels=
@@ -26,6 +27,17 @@ patch_vbmeta_flag=auto
 no_magisk_check=1
 
 . tools/ak3-core.sh
+
+kernel_version=$(cat /proc/version | awk -F '-' '{print $1}' | awk '{print $3}')
+case $kernel_version in
+    5.1*) ksu_supported=true ;;
+    6.1*) ksu_supported=true ;;
+    6.6*) ksu_supported=true ;;
+    *) ksu_supported=false ;;
+esac
+
+ui_print " " "  -> GarnetKernel GKI Supported: $ksu_supported"
+$ksu_supported || abort "  -> Non-GKI device, abort."
 
 split_boot
 if [ -f "split_img/ramdisk.cpio" ]; then
