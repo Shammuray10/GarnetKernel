@@ -1,4 +1,4 @@
-### AnyKernel3 Ramdisk Mod Script
+### AnyKernell3 Ramdisk Mod Script
 ## osm0sis @ xda-developers
 
 ### AnyKernel setup
