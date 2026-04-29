@@ -26,9 +26,10 @@ env:
   KERNEL_REPO:   https://android.googlesource.com/kernel/common
   KERNEL_BRANCH: android12-5.10
 
-  # KernelSU Next — "stable" evita la rotura de syscall hooks v1.5
-  # que causaba error de compilación en ARMv8.2 con v3.2.0
-  KSU_TAG: stable
+  # KernelSU Next — v3.1.0 es la última versión estable con 5.10 QGKI
+  # v3.2.0 rompe kernels 5.10 (syscall hooks v1.5 incompatibles con ARMv8.2)
+  # "stable" también resuelve a v3.2.0 — usar tag exacto
+  KSU_TAG: v3.1.0
 
   # SUSFS — rama GKI correcta para android12-5.10
   SUSFS_REPO:   https://gitlab.com/simonpunk/susfs4ksu.git
