@@ -103,6 +103,49 @@ jobs:
           echo "KSU_DIR=$KSU_DIR" >> $GITHUB_ENV
           echo "KernelSU Next ($KSU_DIR) $KSU_VER integrated"
 
+      - name: Clone SUSFS
+        if: ${{ github.event.inputs.ENABLE_SUSFS != 'false' }}
+        run: |
+          git clone --depth=1 -b ${{ env.SUSFS_BRANCH }} ${{ env.SUSFS_REPO }} susfs
+          SUSFS_VER=$(cat susfs/VERSION 2>/dev/null || echo "v2.0.0")
+          echo "SUSFS_VER=$SUSFS_VER" >> $GITHUB_ENV
+
+      - name: Apply SUSFS patch
+        if: ${{ github.event.inputs.ENABLE_SUSFS != 'false' }}
+        run: |
+          cd kernel
+          find "$GITHUB_WORKSPACE/susfs/kernel_patches/include/" -name "*.h" | while read f; do
+            dest="include/$(echo "$f" | sed 's|.*include/||')"
+            mkdir -p "$(dirname "$dest")"
+            cp "$f" "$dest"
+          done
+          find "$GITHUB_WORKSPACE/susfs/kernel_patches/fs/" -name "*.c" | while read f; do
+            cp "$f" "fs/"
+          done
+          PATCH=""
+          for c in \
+            "$GITHUB_WORKSPACE/susfs/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch" \
+            "$GITHUB_WORKSPACE/susfs/kernel_patches/50_add_susfs_in_kernel-5.10.patch"; do
+            [ -f "$c" ] && PATCH="$c" && break
+          done
+          [ -z "$PATCH" ] && PATCH=$(find "$GITHUB_WORKSPACE/susfs/kernel_patches/" -name "*5.10*.patch" | sort | head -1)
+          [ -z "$PATCH" ] && echo "SUSFS patch not found" && exit 1
+          patch -p1 --forward < "$PATCH" && echo "SUSFS applied" || {
+            patch -p1 --forward --reject-file=/tmp/susfs.rej < "$PATCH" || true
+            # Ignorar .rej si son solo "Reversed" (KSU bridge ya aplicado via patch principal)
+            if find . -name "*.rej" | grep -q .; then
+              if grep -q "FAILED" /tmp/susfs.rej 2>/dev/null; then
+                cat /tmp/susfs.rej | head -40 && exit 1
+              else
+                echo "rej files are Reversed-only (already applied) — continuing"
+              fi
+            fi
+            echo "SUSFS applied with minor conflicts"
+          }
+          KSU_PATCH=$(find "$GITHUB_WORKSPACE/susfs/kernel_patches/" \( -name "*ksu*" -o -name "*kernelsu*" \) | head -1)
+          [ -f "$KSU_PATCH" ] && [ -n "$KSU_DIR" ] && \
+            ( cd "$KSU_DIR" && patch -p1 --forward < "$KSU_PATCH" ) || true
+
       - name: Apply KSU manual hooks
         run: |
           python3 -c "
@@ -155,42 +198,6 @@ jobs:
 
           print('All hooks applied')
           "
-
-      - name: Clone SUSFS
-        if: ${{ github.event.inputs.ENABLE_SUSFS != 'false' }}
-        run: |
-          git clone --depth=1 -b ${{ env.SUSFS_BRANCH }} ${{ env.SUSFS_REPO }} susfs
-          SUSFS_VER=$(cat susfs/VERSION 2>/dev/null || echo "v2.0.0")
-          echo "SUSFS_VER=$SUSFS_VER" >> $GITHUB_ENV
-
-      - name: Apply SUSFS patch
-        if: ${{ github.event.inputs.ENABLE_SUSFS != 'false' }}
-        run: |
-          cd kernel
-          find "$GITHUB_WORKSPACE/susfs/kernel_patches/include/" -name "*.h" | while read f; do
-            dest="include/$(echo "$f" | sed 's|.*include/||')"
-            mkdir -p "$(dirname "$dest")"
-            cp "$f" "$dest"
-          done
-          find "$GITHUB_WORKSPACE/susfs/kernel_patches/fs/" -name "*.c" | while read f; do
-            cp "$f" "fs/"
-          done
-          PATCH=""
-          for c in \
-            "$GITHUB_WORKSPACE/susfs/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch" \
-            "$GITHUB_WORKSPACE/susfs/kernel_patches/50_add_susfs_in_kernel-5.10.patch"; do
-            [ -f "$c" ] && PATCH="$c" && break
-          done
-          [ -z "$PATCH" ] && PATCH=$(find "$GITHUB_WORKSPACE/susfs/kernel_patches/" -name "*5.10*.patch" | sort | head -1)
-          [ -z "$PATCH" ] && echo "SUSFS patch not found" && exit 1
-          patch -p1 --forward < "$PATCH" && echo "SUSFS applied" || {
-            patch -p1 --forward --reject-file=/tmp/susfs.rej < "$PATCH" || true
-            find . -name "*.rej" | grep -q . && cat /tmp/susfs.rej | head -40 && exit 1
-            echo "SUSFS applied with minor conflicts"
-          }
-          KSU_PATCH=$(find "$GITHUB_WORKSPACE/susfs/kernel_patches/" \( -name "*ksu*" -o -name "*kernelsu*" \) | head -1)
-          [ -f "$KSU_PATCH" ] && [ -n "$KSU_DIR" ] && \
-            ( cd "$KSU_DIR" && patch -p1 --forward < "$KSU_PATCH" ) || true
 
       - name: Apply custom patches
         run: |
@@ -311,3 +318,4 @@ jobs:
           echo "| Features | WALT uclamp Kyber BBR zstd ThinLTO |" >> $GITHUB_STEP_SUMMARY
           echo "| Build time | ${{ env.BUILD_TIME }} |" >> $GITHUB_STEP_SUMMARY
           echo "| ZIP | ${{ env.ZIPNAME }} |" >> $GITHUB_STEP_SUMMARY
+          
