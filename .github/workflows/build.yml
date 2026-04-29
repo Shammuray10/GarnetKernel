@@ -169,11 +169,22 @@ jobs:
         run: |
           cd kernel
 
-          # Copiar archivos fuente
-          cp ../susfs/kernel_patches/fs/susfs.c         fs/            2>/dev/null && echo "✓ fs/susfs.c"
-          cp ../susfs/kernel_patches/fs/sus_su.c        fs/            2>/dev/null && echo "✓ fs/sus_su.c"
-          cp ../susfs/kernel_patches/include/linux/susfs.h  include/linux/ 2>/dev/null && echo "✓ susfs.h"
-          cp ../susfs/kernel_patches/include/linux/sus_su.h include/linux/ 2>/dev/null && echo "✓ sus_su.h"
+          # Copiar TODOS los headers recursivamente
+          # v2.0.0 añade susfs_def.h y potencialmente otros — no hardcodear nombres
+          echo "Copying SUSFS headers..."
+          find "$GITHUB_WORKSPACE/susfs/kernel_patches/include/" \
+            -name "*.h" | while read f; do
+            dest="include/$(echo $f | sed 's|.*include/||')"
+            mkdir -p "$(dirname $dest)"
+            cp "$f" "$dest" && echo "  ✓ $dest"
+          done
+
+          # Copiar todos los fuentes fs/
+          echo "Copying SUSFS sources..."
+          find "$GITHUB_WORKSPACE/susfs/kernel_patches/fs/" \
+            -name "*.c" | while read f; do
+            cp "$f" "fs/" && echo "  ✓ fs/$(basename $f)"
+          done
 
           # Buscar patch principal
           PATCH=""
