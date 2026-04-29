@@ -19,51 +19,28 @@ on:
         required: false
         default: 'true'
 
-# ─────────────────────────────────────────────────────────────────────────────
 env:
-  # Kernel: GKI android12-5.10 — misma base que Wild Kernel 5.10.236
-  # Wild confirma que esta base arranca en garnet + HyperOS 3
   KERNEL_REPO:   https://android.googlesource.com/kernel/common
   KERNEL_BRANCH: android12-5.10
-
-  # KernelSU Next — v3.1.0 es la última versión estable con 5.10 QGKI
-  # v3.2.0 rompe kernels 5.10 (syscall hooks v1.5 incompatibles con ARMv8.2)
-  # "stable" también resuelve a v3.2.0 — usar tag exacto
-  KSU_TAG: v3.1.0
-
-  # SUSFS — rama GKI correcta para android12-5.10
-  SUSFS_REPO:   https://gitlab.com/simonpunk/susfs4ksu.git
-  SUSFS_BRANCH: gki-android12-5.10
-
-  # Toolchain
-  CLANG_DIR: /home/runner/neutron-clang
-
-  # Identity
-  KERNEL_NAME:  GarnetKernel
-  LOCALVERSION: -GarnetKernel
+  KSU_TAG:       v3.1.0
+  SUSFS_REPO:    https://gitlab.com/simonpunk/susfs4ksu.git
+  SUSFS_BRANCH:  gki-android12-5.10
+  CLANG_DIR:     /home/runner/neutron-clang
+  KERNEL_NAME:   GarnetKernel
+  LOCALVERSION:  -GarnetKernel
 
 jobs:
   build:
     name: Build GarnetKernel
     runs-on: ubuntu-24.04
     timeout-minutes: 180
-
     steps:
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. CHECKOUT
-# ─────────────────────────────────────────────────────────────────────────────
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
           path: garnet-scripts
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. DEPENDENCIAS
-# NO se instala lld/llvm del sistema — se usan los de Neutron Clang 18
-# El binutils del sistema no soporta LSE atomics (ARMv8.1+), lo que causaba
-# "LSE atomics not supported" + bootloop silencioso en SM7435 (ARMv8.2)
-# ─────────────────────────────────────────────────────────────────────────────
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq
@@ -73,9 +50,6 @@ jobs:
             zip curl wget ccache pahole zstd \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. CCACHE
-# ─────────────────────────────────────────────────────────────────────────────
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
@@ -85,15 +59,12 @@ jobs:
             garnet-gki-clang18-
             garnet-gki-
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. NEUTRON CLANG 18
-# ─────────────────────────────────────────────────────────────────────────────
       - name: Cache Neutron Clang
         id: cache-clang
         uses: actions/cache@v4
         with:
           path: ${{ env.CLANG_DIR }}
-          key: neutron-clang-antman-latest-v4
+          key: neutron-clang-antman-latest-v5
 
       - name: Download Neutron Clang
         if: steps.cache-clang.outputs.cache-hit != 'true'
@@ -109,351 +80,205 @@ jobs:
         run: |
           echo "${{ env.CLANG_DIR }}/bin" >> $GITHUB_PATH
           echo "CLANG_PATH=${{ env.CLANG_DIR }}" >> $GITHUB_ENV
-          # Verificar que el assembler de LLVM está disponible
           clang --version
-          llvm-as --version 2>/dev/null || echo "llvm-as no disponible como binario independiente (OK, LLVM_IAS=1 lo maneja)"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 5. KERNEL SOURCE
-# ─────────────────────────────────────────────────────────────────────────────
       - name: Clone kernel source
         run: |
-          git clone --depth=1 \
-            -b ${{ env.KERNEL_BRANCH }} \
-            ${{ env.KERNEL_REPO }} kernel
-
+          git clone --depth=1 -b ${{ env.KERNEL_BRANCH }} ${{ env.KERNEL_REPO }} kernel
           cd kernel
           KHEAD=$(git rev-parse --short HEAD)
           echo "KERNEL_HEAD=$KHEAD" >> $GITHUB_ENV
-          echo "✅ $KHEAD — $(git log --oneline -1)"
+          echo "Source: $KHEAD"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 6. KERNELSU NEXT
-# "stable" = última versión estable sin syscall hooks v1.5 rotos en ARMv8.2
-# ─────────────────────────────────────────────────────────────────────────────
-      - name: Integrate KernelSU Next
+      - name: Integrate KernelSU Next v3.1.0
         run: |
           cd kernel
-          curl -LSs \
-            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
-            | bash -s ${{ env.KSU_TAG }}
-
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s ${{ env.KSU_TAG }}
           KSU_DIR=""
           [ -d "KernelSU-Next" ] && KSU_DIR="KernelSU-Next"
           [ -d "KernelSU" ]      && KSU_DIR="KernelSU"
+          [ -z "$KSU_DIR" ] && echo "KSU dir not found" && exit 1
+          KSU_VER=$(cat "$KSU_DIR/VERSION" 2>/dev/null || echo "${{ env.KSU_TAG }}")
+          echo "KSU_VER=$KSU_VER" >> $GITHUB_ENV
+          echo "KSU_DIR=$KSU_DIR" >> $GITHUB_ENV
+          echo "KernelSU Next ($KSU_DIR) $KSU_VER integrated"
 
-          if [ -z "$KSU_DIR" ]; then
-            echo "❌ KernelSU integration failed"
-            exit 1
-          fi
+      - name: Apply KSU manual hooks
+        run: |
+          python3 -c "
+          import os, sys
+          K = 'kernel'
+          def hook(f, marker, before, decl, after_line, call):
+              path = os.path.join(K, f)
+              c = open(path).read()
+              if marker in c:
+                  print(f'  skip {f} (already hooked)')
+                  return
+              if before not in c:
+                  print(f'  FAIL {f}: anchor not found')
+                  sys.exit(1)
+              c = c.replace(before, decl + before, 1)
+              if after_line in c:
+                  c = c.replace(after_line, after_line + call, 1)
+              open(path, 'w').write(c)
+              print(f'  ok {f}')
 
-          KSU_VER=$(cat "$KSU_DIR/VERSION" 2>/dev/null || echo "stable")
-          echo "KSU_VER=$KSU_VER"   >> $GITHUB_ENV
-          echo "KSU_DIR=$KSU_DIR"   >> $GITHUB_ENV
-          echo "✅ KernelSU Next ($KSU_DIR) — $KSU_VER"
+          hook('fs/exec.c', 'ksu_handle_execveat',
+               'int do_execve(',
+               '\n#ifdef CONFIG_KSU\nextern int ksu_handle_execveat(int *fd, struct filename **f, void *a, void *e, int *fl);\n#endif\n',
+               'struct user_arg_ptr envp = { .ptr.native = __envp };',
+               '\n\t#ifdef CONFIG_KSU\n\tksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);\n\t#endif\n')
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 7. SUSFS
-# ─────────────────────────────────────────────────────────────────────────────
+          hook('fs/open.c', 'ksu_handle_faccessat',
+               'long do_faccessat(',
+               '\n#ifdef CONFIG_KSU\nextern int ksu_handle_faccessat(int *dfd, const char __user **fn, int *mode, int *flags);\n#endif\n',
+               'unsigned int lookup_flags = LOOKUP_FOLLOW;',
+               '\n\t#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n\t#endif\n')
+
+          hook('fs/read_write.c', 'ksu_handle_sys_read',
+               'ssize_t vfs_read(',
+               '\n#ifdef CONFIG_KSU\nextern int ksu_handle_sys_read(unsigned int fd, char __user **buf, size_t *cnt);\n#endif\n',
+               'if (!(file->f_mode & FMODE_READ))',
+               '\n\t#ifdef CONFIG_KSU\n\tksu_handle_sys_read(0, NULL, NULL);\n\t#endif\n')
+
+          hook('fs/devpts/inode.c', 'ksu_handle_devpts',
+               'void *devpts_get_priv(',
+               '\n#ifdef CONFIG_KSU\nextern int ksu_handle_devpts(struct inode *);\n#endif\n',
+               'if (dentry->d_sb->s_magic != DEVPTS_SUPER_MAGIC)',
+               '\n\t#ifdef CONFIG_KSU\n\tksu_handle_devpts(dentry->d_inode);\n\t#endif\n')
+
+          hook('kernel/reboot.c', 'ksu_handle_sys_reboot',
+               'SYSCALL_DEFINE4(reboot,',
+               '\n#ifdef CONFIG_KSU\nextern int ksu_handle_sys_reboot(int m1, int m2, unsigned int cmd, void __user **arg);\n#endif\n',
+               'int ret = 0;',
+               '\n\t#ifdef CONFIG_KSU\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n\t#endif\n')
+
+          print('All hooks applied')
+          "
+
       - name: Clone SUSFS
         if: ${{ github.event.inputs.ENABLE_SUSFS != 'false' }}
         run: |
-          git clone --depth=1 \
-            -b ${{ env.SUSFS_BRANCH }} \
-            ${{ env.SUSFS_REPO }} susfs
-
+          git clone --depth=1 -b ${{ env.SUSFS_BRANCH }} ${{ env.SUSFS_REPO }} susfs
           SUSFS_VER=$(cat susfs/VERSION 2>/dev/null || echo "v2.0.0")
           echo "SUSFS_VER=$SUSFS_VER" >> $GITHUB_ENV
-          echo "✅ SUSFS — $SUSFS_VER"
 
       - name: Apply SUSFS patch
         if: ${{ github.event.inputs.ENABLE_SUSFS != 'false' }}
         run: |
           cd kernel
-
-          # Copiar headers recursivamente (v2.0.0 añade susfs_def.h y otros)
-          echo "Copying SUSFS headers..."
-          find "$GITHUB_WORKSPACE/susfs/kernel_patches/include/" \
-            -name "*.h" | while read f; do
+          find "$GITHUB_WORKSPACE/susfs/kernel_patches/include/" -name "*.h" | while read f; do
             dest="include/$(echo "$f" | sed 's|.*include/||')"
             mkdir -p "$(dirname "$dest")"
-            cp "$f" "$dest" && echo "  ✓ $dest"
+            cp "$f" "$dest"
           done
-
-          # Copiar fuentes fs/
-          echo "Copying SUSFS sources..."
-          find "$GITHUB_WORKSPACE/susfs/kernel_patches/fs/" \
-            -name "*.c" | while read f; do
-            cp "$f" "fs/" && echo "  ✓ fs/$(basename "$f")"
+          find "$GITHUB_WORKSPACE/susfs/kernel_patches/fs/" -name "*.c" | while read f; do
+            cp "$f" "fs/"
           done
-
-          # Localizar patch principal
           PATCH=""
-          for candidate in \
+          for c in \
             "$GITHUB_WORKSPACE/susfs/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch" \
             "$GITHUB_WORKSPACE/susfs/kernel_patches/50_add_susfs_in_kernel-5.10.patch"; do
-            [ -f "$candidate" ] && PATCH="$candidate" && break
+            [ -f "$c" ] && PATCH="$c" && break
           done
-          [ -z "$PATCH" ] && \
-            PATCH=$(find "$GITHUB_WORKSPACE/susfs/kernel_patches/" \
-              -name "*5.10*.patch" 2>/dev/null | sort | head -1)
-
-          if [ -z "$PATCH" ]; then
-            echo "❌ SUSFS patch not found"
-            ls "$GITHUB_WORKSPACE/susfs/kernel_patches/"
-            exit 1
-          fi
-
-          echo "Applying: $(basename "$PATCH")"
-          if patch -p1 --forward < "$PATCH"; then
-            echo "✅ SUSFS patch applied cleanly"
-          else
+          [ -z "$PATCH" ] && PATCH=$(find "$GITHUB_WORKSPACE/susfs/kernel_patches/" -name "*5.10*.patch" | sort | head -1)
+          [ -z "$PATCH" ] && echo "SUSFS patch not found" && exit 1
+          patch -p1 --forward < "$PATCH" && echo "SUSFS applied" || {
             patch -p1 --forward --reject-file=/tmp/susfs.rej < "$PATCH" || true
-            if find . -name "*.rej" 2>/dev/null | grep -q .; then
-              echo "❌ SUSFS patch failed — .rej:"
-              cat /tmp/susfs.rej 2>/dev/null | head -60
-              exit 1
-            fi
-            echo "⚠ SUSFS patch applied with minor conflicts (resolved)"
-          fi
+            find . -name "*.rej" | grep -q . && cat /tmp/susfs.rej | head -40 && exit 1
+            echo "SUSFS applied with minor conflicts"
+          }
+          KSU_PATCH=$(find "$GITHUB_WORKSPACE/susfs/kernel_patches/" \( -name "*ksu*" -o -name "*kernelsu*" \) | head -1)
+          [ -f "$KSU_PATCH" ] && [ -n "$KSU_DIR" ] && \
+            ( cd "$KSU_DIR" && patch -p1 --forward < "$KSU_PATCH" ) || true
 
-          # KSU bridge patch (si existe)
-          KSU_PATCH=$(find "$GITHUB_WORKSPACE/susfs/kernel_patches/" \
-            \( -name "*ksu*" -o -name "*kernelsu*" \) 2>/dev/null | head -1)
-          if [ -f "$KSU_PATCH" ] && [ -n "$KSU_DIR" ]; then
-            echo "Applying KSU bridge: $(basename "$KSU_PATCH")"
-            ( cd "$KSU_DIR" && patch -p1 --forward < "$KSU_PATCH" ) && \
-              echo "✅ KSU bridge applied" || \
-              echo "⚠ KSU bridge skipped (already applied)"
-          fi
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 8. CUSTOM PATCHES
-# ─────────────────────────────────────────────────────────────────────────────
       - name: Apply custom patches
         run: |
           PDIR="${{ github.workspace }}/garnet-scripts/patches"
           if [ -d "$PDIR" ] && ls "$PDIR"/*.patch 2>/dev/null; then
             cd kernel
             for p in "$PDIR"/*.patch; do
-              echo "Applying: $(basename "$p")"
-              patch -p1 --forward < "$p" && echo "  ✅ OK" || \
-                echo "  ⚠ skipped (already applied)"
+              patch -p1 --forward < "$p" && echo "ok: $(basename $p)" || echo "skip: $(basename $p)"
             done
-          else
-            echo "No custom patches — skipping"
           fi
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 9. DEFCONFIG
-# gki_defconfig = base mínima GKI (misma que Wild Kernel)
-# overlay = optimizaciones sobre esa base
-# ─────────────────────────────────────────────────────────────────────────────
       - name: Generate defconfig
         run: |
           cd kernel
           mkdir -p out
-
-          echo "=== Base: gki_defconfig ==="
-          make O=out ARCH=arm64 \
-            LLVM=1 LLVM_IAS=1 \
-            CC=clang \
-            gki_defconfig
-
-          echo "=== Overlay ==="
-
-          # KernelSU Next
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang gki_defconfig
+          scripts/config --file out/.config -e KSU -e KSU_DEBUG
           scripts/config --file out/.config \
-            -e KSU \
-            -e KSU_DEBUG
-
-          # SUSFS v2.0.0
-          scripts/config --file out/.config \
-            -e KSU_SUSFS \
-            -e KSU_SUSFS_SUS_PATH \
-            -e KSU_SUSFS_SUS_MOUNT \
+            -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT \
             -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
             -e KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT \
-            -e KSU_SUSFS_SUS_KSTAT \
-            -e KSU_SUSFS_SUS_OVERLAYFS \
-            -e KSU_SUSFS_TRY_UMOUNT \
-            -e KSU_SUSFS_SPOOF_UNAME \
-            -e KSU_SUSFS_ENABLE_LOG \
-            -e KSU_SUSFS_OPEN_REDIRECT \
-            -e KSU_SUSFS_SUS_SU
-
-          # Scheduler: WALT + EAS + uclamp (gaming boost)
+            -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SUS_OVERLAYFS \
+            -e KSU_SUSFS_TRY_UMOUNT -e KSU_SUSFS_SPOOF_UNAME \
+            -e KSU_SUSFS_ENABLE_LOG -e KSU_SUSFS_OPEN_REDIRECT -e KSU_SUSFS_SUS_SU
           scripts/config --file out/.config \
-            -e SCHED_WALT \
-            -e SCHED_CORE_CTL \
-            -e CPU_BOOST \
-            -e UCLAMP_TASK \
-            -e UCLAMP_TASK_GROUP \
-            --set-val UCLAMP_BUCKETS_COUNT 5 \
+            -e SCHED_WALT -e SCHED_CORE_CTL -e CPU_BOOST \
+            -e UCLAMP_TASK -e UCLAMP_TASK_GROUP --set-val UCLAMP_BUCKETS_COUNT 5 \
             -e ENERGY_MODEL \
-            -e CPU_FREQ_GOV_SCHEDUTIL \
-            -e CPU_FREQ_GOV_PERFORMANCE \
-            -e CPU_FREQ_GOV_POWERSAVE \
-            -d CPU_FREQ_GOV_ONDEMAND \
-            -d CPU_FREQ_GOV_CONSERVATIVE \
-            -e CPU_IDLE \
-            -e CPU_IDLE_GOV_MENU \
-            -e ARM_PSCI_CPUIDLE
-
-          # GPU devfreq
+            -e CPU_FREQ_GOV_SCHEDUTIL -e CPU_FREQ_GOV_PERFORMANCE -e CPU_FREQ_GOV_POWERSAVE \
+            -d CPU_FREQ_GOV_ONDEMAND -d CPU_FREQ_GOV_CONSERVATIVE \
+            -e CPU_IDLE -e CPU_IDLE_GOV_MENU -e ARM_PSCI_CPUIDLE
           scripts/config --file out/.config \
-            -e DEVFREQ_GOV_SIMPLE_ONDEMAND \
-            -e DEVFREQ_GOV_PERFORMANCE
-
-          # I/O: Kyber (baja latencia, ideal UFS 3.1)
+            -e DEVFREQ_GOV_SIMPLE_ONDEMAND -e DEVFREQ_GOV_PERFORMANCE
           scripts/config --file out/.config \
-            -e MQ_IOSCHED_KYBER \
-            -e MQ_IOSCHED_DEADLINE \
-            -d IOSCHED_CFQ
-
-          # zRAM + zstd
+            -e MQ_IOSCHED_KYBER -e MQ_IOSCHED_DEADLINE -d IOSCHED_CFQ
           scripts/config --file out/.config \
-            -e ZRAM \
-            -e ZSMALLOC \
-            -e CRYPTO_LZ4 \
-            -e CRYPTO_ZSTD \
-            -e ZRAM_DEF_COMP_ZSTD \
-            -e TRANSPARENT_HUGEPAGE \
-            -e TRANSPARENT_HUGEPAGE_MADVISE
-
-          # TCP BBR
+            -e ZRAM -e ZSMALLOC -e CRYPTO_LZ4 -e CRYPTO_ZSTD -e ZRAM_DEF_COMP_ZSTD \
+            -e TRANSPARENT_HUGEPAGE -e TRANSPARENT_HUGEPAGE_MADVISE
           scripts/config --file out/.config \
-            -e TCP_CONG_BBR \
-            -e NET_SCH_FQ \
-            -e NET_SCH_FQ_CODEL \
-            --set-str DEFAULT_TCP_CONG bbr
-
-          # Thin LTO
+            -e TCP_CONG_BBR -e NET_SCH_FQ -e NET_SCH_FQ_CODEL --set-str DEFAULT_TCP_CONG bbr
           if [ "${{ github.event.inputs.ENABLE_LTO }}" != "false" ]; then
-            scripts/config --file out/.config \
-              -d LTO_NONE \
-              -e LTO_CLANG \
-              -e THINLTO
-            echo "LTO: Thin LTO ENABLED"
+            scripts/config --file out/.config -d LTO_NONE -e LTO_CLANG -e THINLTO
           fi
-
-          # Security (Play Integrity)
           scripts/config --file out/.config \
-            -e SECURITY_SELINUX \
-            -e SECURITY_SELINUX_BOOTPARAM \
-            -d SECURITY_SELINUX_DEVELOP \
-            -e RANDOMIZE_BASE \
-            -e RANDOMIZE_MODULE_REGION_FULL
+            -e SECURITY_SELINUX -e SECURITY_SELINUX_BOOTPARAM -d SECURITY_SELINUX_DEVELOP \
+            -e RANDOMIZE_BASE -e RANDOMIZE_MODULE_REGION_FULL
+          scripts/config --file out/.config --set-str LOCALVERSION "${{ env.LOCALVERSION }}"
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang olddefconfig
+          grep -E "^CONFIG_(KSU|SUSFS|LTO|THINLTO|SCHED_WALT|UCLAMP|ZRAM|KYBER|BBR)" out/.config || true
 
-          # Localversion
-          scripts/config --file out/.config \
-            --set-str LOCALVERSION "${{ env.LOCALVERSION }}"
-
-          # Resolver dependencias finales
-          make O=out ARCH=arm64 \
-            LLVM=1 LLVM_IAS=1 \
-            CC=clang \
-            olddefconfig
-
-          echo "=== Configs clave ==="
-          grep -E "^CONFIG_(KSU|SUSFS|LTO|THINLTO|SCHED_WALT|UCLAMP|ZRAM|KYBER|BBR)" \
-            out/.config || true
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 10. BUILD
-# Toolchain: 100% LLVM — sin depender del binutils del sistema
-#   LLVM=1       → usa llvm-ar, llvm-nm, ld.lld para todo
-#   LLVM_IAS=1   → usa el assembler integrado de Clang (no aarch64-linux-gnu-as)
-#   CC="ccache clang" → ccache acelera rebuilds
-# KCFLAGS para SM7435 (4x Cortex-A78 @ 2.4GHz + 4x Cortex-A55 @ 1.95GHz):
-#   -mcpu=cortex-a78  → optimiza para los cores big (pipeline OoO 4-wide)
-#   -march=armv8.2-a  → ISA correcta (incluye LSE, FP16, DotProd)
-#   -O3               → máxima optimización
-# ─────────────────────────────────────────────────────────────────────────────
       - name: Build GarnetKernel
         run: |
           cd kernel
           BUILD_START=$(date +%s)
-          echo "Build started: $(date)"
-
-          make -j$(nproc --all) \
-            O=out \
-            ARCH=arm64 \
-            CC="ccache clang" \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
+          make -j$(nproc --all) O=out ARCH=arm64 \
+            CC="ccache clang" LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
             CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            KCFLAGS="-O3 -mcpu=cortex-a78 -mtune=cortex-a78 -march=armv8.2-a \
-                     -Wno-error=frame-larger-than \
-                     -Wno-error=unused-function" \
-            KBUILD_BUILD_USER=Shammuray10 \
-            KBUILD_BUILD_HOST=GarnetKernel \
+            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LLVM=1 LLVM_IAS=1 \
+            KCFLAGS="-O3 -mcpu=cortex-a78 -mtune=cortex-a78 -march=armv8.2-a -Wno-error=frame-larger-than -Wno-error=unused-function" \
+            KBUILD_BUILD_USER=Shammuray10 KBUILD_BUILD_HOST=GarnetKernel \
             2>&1 | tee out/build.log
-
           DIFF=$(( $(date +%s) - BUILD_START ))
-          BUILD_TIME="$((DIFF/60))m $((DIFF%60))s"
-          echo "BUILD_TIME=$BUILD_TIME" >> $GITHUB_ENV
+          echo "BUILD_TIME=$((DIFF/60))m $((DIFF%60))s" >> $GITHUB_ENV
+          [ ! -f out/arch/arm64/boot/Image ] && echo "BUILD FAILED" && tail -150 out/build.log && exit 1
+          grep -q "LSE atomics not supported" out/build.log && echo "LSE atomics error" && exit 1
+          echo "Build OK: $((DIFF/60))m $((DIFF%60))s"
+          ls -lh out/arch/arm64/boot/Image
 
-          if [ -f out/arch/arm64/boot/Image ]; then
-            echo "✅ Build OK — $BUILD_TIME"
-            ls -lh out/arch/arm64/boot/Image
-            # Verificar que no hay warnings de LSE atomics (indicaría toolchain roto)
-            if grep -q "LSE atomics not supported" out/build.log; then
-              echo "❌ FATAL: LSE atomics not supported — assembler del sistema interfiriendo"
-              echo "   LLVM_IAS=1 debería prevenir esto. Revisar PATH."
-              exit 1
-            fi
-            echo "✅ No LSE atomics warnings — assembler LLVM funcionando correctamente"
-          else
-            echo "❌ BUILD FAILED"
-            tail -150 out/build.log
-            exit 1
-          fi
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 11. PACKAGE
-# AnyKernel3 de WildKernels — estructura y tools probados en garnet + HyperOS 3
-# Solo reemplazamos Image y anykernel.sh (branding + lógica de flash)
-# ─────────────────────────────────────────────────────────────────────────────
       - name: Clone AnyKernel3
         run: |
-          git clone --depth=1 \
-            https://github.com/WildKernels/AnyKernel3.git anykernel
+          git clone --depth=1 https://github.com/WildKernels/AnyKernel3.git anykernel
           rm -rf anykernel/.git
 
       - name: Package ZIP
         run: |
           cp kernel/out/arch/arm64/boot/Image anykernel/
-
-          [ -f kernel/out/arch/arm64/boot/dtb.img  ] && \
-            cp kernel/out/arch/arm64/boot/dtb.img  anykernel/ || true
-          [ -f kernel/out/arch/arm64/boot/dtbo.img ] && \
-            cp kernel/out/arch/arm64/boot/dtbo.img anykernel/ || true
-
+          [ -f kernel/out/arch/arm64/boot/dtb.img  ] && cp kernel/out/arch/arm64/boot/dtb.img  anykernel/ || true
+          [ -f kernel/out/arch/arm64/boot/dtbo.img ] && cp kernel/out/arch/arm64/boot/dtbo.img anykernel/ || true
           cp "${{ github.workspace }}/garnet-scripts/anykernel/anykernel.sh" anykernel/
-
           TIMESTAMP=$(date +%Y%m%d-%H%M)
-          SUSFS_TAG="${{ env.SUSFS_VER }}"
-          [ -z "$SUSFS_TAG" ] && SUSFS_TAG="noSUSFS"
+          SUSFS_TAG="${{ env.SUSFS_VER }}"; [ -z "$SUSFS_TAG" ] && SUSFS_TAG="noSUSFS"
           ZIPNAME="${{ env.KERNEL_NAME }}-garnet-${TIMESTAMP}-KSUNext-${{ env.KSU_VER }}-SUSFS-${SUSFS_TAG}.zip"
           echo "ZIPNAME=$ZIPNAME" >> $GITHUB_ENV
+          cd anykernel && zip -r9 "../$ZIPNAME" . -x "*.git*" -x "*placeholder" && cd ..
+          echo "ZIP: $ZIPNAME ($(du -h $ZIPNAME | cut -f1))"
 
-          cd anykernel
-          zip -r9 "../$ZIPNAME" . -x "*.git*" -x "*placeholder"
-          cd ..
-          echo "✅ ZIP: $ZIPNAME ($(du -h "$ZIPNAME" | cut -f1))"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 12. UPLOAD
-# ─────────────────────────────────────────────────────────────────────────────
       - name: Upload kernel ZIP
         uses: actions/upload-artifact@v4
         with:
@@ -469,31 +294,20 @@ jobs:
           path: kernel/out/build.log
           retention-days: 7
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 13. SUMMARY
-# ─────────────────────────────────────────────────────────────────────────────
       - name: Build Summary
         if: success()
         run: |
-          echo "## ✅ GarnetKernel — Build OK" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## GarnetKernel Build OK" >> $GITHUB_STEP_SUMMARY
           echo "| Campo | Valor |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Device | Redmi Note 13 Pro 5G (2312DRA50G) |" >> $GITHUB_STEP_SUMMARY
-          echo "| SoC | Snapdragon 7s Gen 2 (SM7435) |" >> $GITHUB_STEP_SUMMARY
-          echo "| CPU | 4x Cortex-A78 @ 2.4GHz + 4x Cortex-A55 @ 1.95GHz |" >> $GITHUB_STEP_SUMMARY
+          echo "| SoC | SM7435 Snapdragon 7s Gen 2 — ARMv8.2 |" >> $GITHUB_STEP_SUMMARY
           echo "| ROM | HyperOS 3 stock |" >> $GITHUB_STEP_SUMMARY
-          echo "| Kernel base | GKI ${{ env.KERNEL_BRANCH }} @ ${{ env.KERNEL_HEAD }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| KernelSU Next | ${{ env.KSU_VER }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Kernel | GKI ${{ env.KERNEL_BRANCH }} @ ${{ env.KERNEL_HEAD }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| KernelSU Next | ${{ env.KSU_VER }} + manual hooks |" >> $GITHUB_STEP_SUMMARY
           echo "| SUSFS | ${{ env.SUSFS_VER }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Compiler | Neutron Clang 18 — 100% LLVM toolchain |" >> $GITHUB_STEP_SUMMARY
-          echo "| Assembler | LLVM IAS (no binutils del sistema) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Compiler | Neutron Clang 18 LLVM |" >> $GITHUB_STEP_SUMMARY
           echo "| KCFLAGS | -O3 -mcpu=cortex-a78 -march=armv8.2-a |" >> $GITHUB_STEP_SUMMARY
-          echo "| LTO | Thin LTO |" >> $GITHUB_STEP_SUMMARY
-          echo "| Scheduler | WALT + EAS + uclamp |" >> $GITHUB_STEP_SUMMARY
-          echo "| I/O | Kyber (UFS 3.1) |" >> $GITHUB_STEP_SUMMARY
-          echo "| TCP | BBR |" >> $GITHUB_STEP_SUMMARY
-          echo "| zRAM | zstd |" >> $GITHUB_STEP_SUMMARY
+          echo "| Features | WALT uclamp Kyber BBR zstd ThinLTO |" >> $GITHUB_STEP_SUMMARY
           echo "| Build time | ${{ env.BUILD_TIME }} |" >> $GITHUB_STEP_SUMMARY
           echo "| ZIP | ${{ env.ZIPNAME }} |" >> $GITHUB_STEP_SUMMARY
-          
