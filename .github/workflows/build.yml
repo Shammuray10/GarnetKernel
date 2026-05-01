@@ -2,21 +2,19 @@ name: GarnetKernel Build
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # GarnetKernel — Redmi Note 13 Pro 5G (garnet / 2312DRA50G)
-# SoC: Snapdragon 7s Gen 2 (SM7435) — 4x Cortex-A78 @ 2.4GHz + 4x A55 @ 1.95GHz
-# ROM: HyperOS 3.0.5 Global — Android 16
-# GPU: Adreno 710
+# SoC : Snapdragon 7s Gen 2 (SM7435) — 4x Cortex-A78@2.4GHz + 4x A55@1.95GHz
+# ROM : HyperOS 3.0.5 Global — Android 16 — GPU Adreno 710
 #
-# ESTRATEGIA (por qué funciona):
-# 1. Base: GKI android12-5.10 — misma base que Wild Kernel (arranca garantizado)
-# 2. KernelSU: setup.sh de WildKernels (no KernelSU-Next directo) — evita el bug
-#    de syscall hooks v1.5 que rompe ARMv8.2 en v3.2.0
-# 3. SUSFS: primero el patch, luego los hooks manuales — orden crítico para
-#    evitar conflictos de offset en fs/open.c
-# 4. Toolchain: AOSP Clang (mismo que Wild Kernel) — compatible con restricciones
-#    ISA del GKI. Neutron Clang 18 con -mcpu=cortex-a78 generaba instrucciones
-#    incompatibles con el GKI que causaban bootloop silencioso
-# 5. Fixes extra: STACKPROTECTOR_PER_TASK, module.c symbol check — evitan
-#    bootloops documentados en GKI 5.10 con Xiaomi
+# TOOLCHAIN: AOSP Clang r416183b (Clang 12.0.5)
+#   → Exactamente el mismo que usa Wild Kernel 5.10.236 (funciona en garnet)
+#   → ID: Android toolchain 7284624, based on r416183b
+#   → Clang 20 / Neutron Clang 18 con -mcpu=cortex-a78 → bootloop silencioso
+#
+# ORDEN CRÍTICO DE PASOS:
+#   1. Fuente GKI android12-5.10
+#   2. SUSFS patch  ← PRIMERO (toca fs/open.c, fs/exec.c, etc.)
+#   3. KSU hooks    ← DESPUÉS de SUSFS (mismo archivos, orden importa)
+#   4. defconfig + build
 # ═══════════════════════════════════════════════════════════════════════════════
 
 on:
@@ -39,26 +37,19 @@ on:
         default: 'true'
 
 env:
-  # ── Kernel ────────────────────────────────────────────────
   KERNEL_REPO:   https://android.googlesource.com/kernel/common
   KERNEL_BRANCH: android12-5.10
 
-  # ── KernelSU — setup via WildKernels (probado en GKI 5.10) ─
-  # WildKernels usa su propia versión que maneja correctamente
-  # los hooks manuales para ARMv8.2 sin los bugs de v3.2.0
+  # KernelSU via WildKernels setup (gestiona hooks ARMv8.2 correctamente)
   KSU_SETUP_URL: https://raw.githubusercontent.com/WildKernels/GKI_KernelSU_SUSFS/main/setup_ksun.sh
 
-  # ── SUSFS ─────────────────────────────────────────────────
   SUSFS_REPO:   https://gitlab.com/simonpunk/susfs4ksu.git
   SUSFS_BRANCH: gki-android12-5.10
 
-  # ── Toolchain: AOSP Clang ─────────────────────────────────
-  # Mismo que Wild Kernel — evita incompatibilidades de ISA con GKI
-  # r547379 = Clang 20 (AOSP prebuilt, validado en android12-5.10)
-  AOSP_CLANG_VERSION: r547379
-  CLANG_DIR: /home/runner/aosp-clang
+  # AOSP Clang r416183b = Clang 12.0.5 = toolchain exacto de Wild Kernel
+  AOSP_CLANG_REV: r416183b
+  CLANG_DIR:      /home/runner/aosp-clang
 
-  # ── Identity ──────────────────────────────────────────────
   KERNEL_NAME:  GarnetKernel
   LOCALVERSION: -GarnetKernel
 
@@ -80,52 +71,74 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             bc bison build-essential ca-certificates cpio flex \
-            git kmod libelf-dev libssl-dev python3 python3-pip \
+            git kmod libelf-dev libssl-dev python3 \
             zip curl wget ccache pahole zstd \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-            binutils-aarch64-linux-gnu
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
           max-size: 8G
-          key: garnet-gki-aosp-clang-${{ github.ref_name }}
+          key: garnet-gki-aosp-${{ env.AOSP_CLANG_REV }}-${{ github.ref_name }}
           restore-keys: |
-            garnet-gki-aosp-clang-
-            garnet-gki-
+            garnet-gki-aosp-${{ env.AOSP_CLANG_REV }}-
+            garnet-gki-aosp-
 
       - name: Cache AOSP Clang
         id: cache-clang
         uses: actions/cache@v4
         with:
           path: ${{ env.CLANG_DIR }}
-          key: aosp-clang-${{ env.AOSP_CLANG_VERSION }}-v1
+          key: aosp-clang-${{ env.AOSP_CLANG_REV }}-v1
 
-      - name: Download AOSP Clang
+      # AOSP Clang r416183b — Clang 12.0.5 — mismo que Wild Kernel 5.10.236
+      - name: Download AOSP Clang r416183b
         if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
           mkdir -p ${{ env.CLANG_DIR }}
-          # AOSP prebuilt clang — mismo toolchain que Google usa para GKI
-          CLANG_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-${{ env.AOSP_CLANG_VERSION }}.tar.gz"
-          echo "Downloading AOSP Clang ${{ env.AOSP_CLANG_VERSION }}..."
-          curl -L "$CLANG_URL" -o /tmp/aosp-clang.tar.gz || {
-            # Fallback: descargar desde mirror de GitHub
-            echo "Trying GitHub mirror..."
-            wget -q "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.0/clang+llvm-20.1.0-aarch64-linux-gnu.tar.xz" -O /tmp/aosp-clang.tar.gz || true
+          cd ${{ env.CLANG_DIR }}
+
+          REV="${{ env.AOSP_CLANG_REV }}"
+          echo "Downloading AOSP Clang $REV (Clang 12.0.5 — Wild Kernel toolchain)..."
+
+          # URL principal: prebuilts AOSP desde rama android12-5.10
+          URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-5.10/clang-${REV}.tar.gz"
+
+          curl -L --retry 3 "$URL" -o clang.tar.gz && \
+            tar -xzf clang.tar.gz && \
+            rm clang.tar.gz && \
+            echo "✅ AOSP Clang $REV extracted" || {
+
+            echo "Primary URL failed — trying android12-stable branch..."
+            URL2="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-stable/clang-${REV}.tar.gz"
+            curl -L --retry 3 "$URL2" -o clang.tar.gz && \
+              tar -xzf clang.tar.gz && \
+              rm clang.tar.gz && \
+              echo "✅ AOSP Clang $REV extracted (mirror)" || {
+
+              echo "AOSP Clang unavailable — falling back to Neutron Clang (safe flags)"
+              cd /tmp
+              curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+              chmod +x antman
+              # Instalar directamente en CLANG_DIR
+              ./antman -S=latest
+              # antman instala en el directorio actual — mover a CLANG_DIR
+              mv neutron-clang/* ${{ env.CLANG_DIR }}/ 2>/dev/null || \
+                rsync -a neutron-clang/ ${{ env.CLANG_DIR }}/ 2>/dev/null || \
+                cp -r neutron-clang/* ${{ env.CLANG_DIR }}/ 2>/dev/null || true
+              echo "✅ Neutron Clang (fallback) installed"
+            }
           }
-          if [ -s /tmp/aosp-clang.tar.gz ]; then
-            tar -xf /tmp/aosp-clang.tar.gz -C ${{ env.CLANG_DIR }} --strip-components=1 2>/dev/null || \
-            tar -xf /tmp/aosp-clang.tar.gz -C ${{ env.CLANG_DIR }} 2>/dev/null || true
-          fi
-          # Si falló la descarga de AOSP, usar Neutron Clang como fallback
-          # pero SIN -mcpu=cortex-a78 (lo que causaba bootloop)
+
+          # Verificar que clang existe en CLANG_DIR
           if [ ! -f "${{ env.CLANG_DIR }}/bin/clang" ]; then
-            echo "AOSP Clang unavailable — using Neutron Clang (safe flags only)"
-            curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
-            chmod +x antman
-            ./antman -S=latest --install-dir=${{ env.CLANG_DIR }}
+            echo "❌ clang binary not found in ${{ env.CLANG_DIR }}/bin/"
+            echo "Contents of CLANG_DIR:"
+            find ${{ env.CLANG_DIR }} -name "clang" -o -name "clang-*" 2>/dev/null | head -5
+            exit 1
           fi
-          echo "Clang ready:"
+
+          echo "✅ Toolchain ready:"
           ${{ env.CLANG_DIR }}/bin/clang --version
 
       - name: Export toolchain to PATH
@@ -142,45 +155,28 @@ jobs:
           cd kernel
           KHEAD=$(git rev-parse --short HEAD)
           echo "KERNEL_HEAD=$KHEAD" >> $GITHUB_ENV
-          echo "Source: $KHEAD — $(git log --oneline -1)"
+          echo "✅ $KHEAD — $(git log --oneline -1)"
 
-      # ── Fix 1: STACKPROTECTOR_PER_TASK ──────────────────────
-      # En GKI android12-5.10 este config se activa por defecto y causa
-      # incompatibilidades con algunos drivers Xiaomi → bootloop silencioso.
-      # zixine/Kernel-GKI-12-5.10 documenta este fix como necesario.
+      # Fix STACKPROTECTOR_PER_TASK — causa bootloop con módulos Xiaomi en GKI 5.10
       - name: Apply GKI compatibility fixes
         run: |
           cd kernel
-
-          # Fix STACKPROTECTOR_PER_TASK — forzar a no-default
-          if grep -q "STACKPROTECTOR_PER_TASK" arch/arm64/Kconfig; then
-            sed -i 's/default STACKPROTECTOR_STRONG/default n/g' arch/arm64/Kconfig
-            echo "✅ STACKPROTECTOR_PER_TASK fixed"
+          if grep -q "default STACKPROTECTOR_STRONG" arch/arm64/Kconfig 2>/dev/null; then
+            sed -i 's/default STACKPROTECTOR_STRONG/default n/' arch/arm64/Kconfig
+            echo "✅ STACKPROTECTOR_PER_TASK: default → n"
           fi
 
-          # Fix module.c — desactivar verificación estricta de versiones de símbolos
-          # Xiaomi añade módulos propietarios que fallan con la verificación GKI estricta
-          if grep -q "disagrees about version of symbol" kernel/module.c 2>/dev/null; then
-            sed -i 's/return -EINVAL;/return 0; \/\* GarnetKernel: bypass strict symbol version check *\//g' kernel/module.c
-            echo "✅ module.c symbol version check relaxed"
-          fi
-
-          echo "✅ Compatibility fixes applied"
-
-      # ── KernelSU via WildKernels setup ──────────────────────
-      # El setup de WildKernels gestiona correctamente:
-      # - hooks manuales (no kprobes) para ARMv8.2
-      # - compatibilidad con SUSFS
-      # - evita el bug de syscall hooks v1.5 de KernelSU-Next v3.2.0
-      - name: Integrate KernelSU (WildKernels setup)
+      - name: Integrate KernelSU
         run: |
           cd kernel
 
-          # Intentar setup de WildKernels
-          if curl -LSs "${{ env.KSU_SETUP_URL }}" -o /tmp/setup_ksun.sh 2>/dev/null; then
-            bash /tmp/setup_ksun.sh && echo "✅ WildKernels KSU setup OK"
+          # Intentar WildKernels setup (gestiona hooks ARMv8.2 + SUSFS bridge)
+          if curl -LSs --connect-timeout 10 "${{ env.KSU_SETUP_URL }}" -o /tmp/setup_ksun.sh 2>/dev/null \
+             && [ -s /tmp/setup_ksun.sh ]; then
+            bash /tmp/setup_ksun.sh
+            echo "✅ WildKernels KSU setup applied"
           else
-            echo "WildKernels setup unavailable — usando KernelSU-Next next branch"
+            echo "WildKernels setup unavailable — usando KernelSU-Next v3.1.0"
             curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
               | bash -s v3.1.0
           fi
@@ -188,16 +184,15 @@ jobs:
           KSU_DIR=""
           [ -d "KernelSU-Next" ] && KSU_DIR="KernelSU-Next"
           [ -d "KernelSU" ]      && KSU_DIR="KernelSU"
-          [ -z "$KSU_DIR" ] && echo "❌ KSU not found" && exit 1
+          [ -z "$KSU_DIR" ] && echo "❌ KSU dir not found" && exit 1
 
           KSU_VER=$(cat "$KSU_DIR/VERSION" 2>/dev/null || echo "unknown")
           echo "KSU_VER=$KSU_VER" >> $GITHUB_ENV
           echo "KSU_DIR=$KSU_DIR" >> $GITHUB_ENV
           echo "✅ KSU ($KSU_DIR) — $KSU_VER"
 
-      # ── SUSFS — PRIMERO el patch, LUEGO los hooks manuales ──
-      # Orden crítico: SUSFS modifica los mismos archivos que los hooks KSU.
-      # Si KSU hooks van primero → SUSFS falla con offset errors en fs/open.c
+      # SUSFS PRIMERO — modifica fs/open.c, fs/exec.c, fs/read_write.c, etc.
+      # Los hooks KSU van DESPUÉS para no desplazar los offsets del patch SUSFS
       - name: Clone SUSFS
         if: ${{ github.event.inputs.ENABLE_SUSFS != 'false' }}
         run: |
@@ -211,7 +206,7 @@ jobs:
         run: |
           cd kernel
 
-          # Copiar todos los archivos (headers + sources) recursivamente
+          # Copiar todos los archivos SUSFS recursivamente
           find "$GITHUB_WORKSPACE/susfs/kernel_patches/include/" -name "*.h" | while read f; do
             dest="include/$(echo "$f" | sed 's|.*include/||')"
             mkdir -p "$(dirname "$dest")"
@@ -221,15 +216,15 @@ jobs:
             cp "$f" "fs/"
           done
 
-          # Localizar patch
           PATCH=""
           for c in \
             "$GITHUB_WORKSPACE/susfs/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch" \
             "$GITHUB_WORKSPACE/susfs/kernel_patches/50_add_susfs_in_kernel-5.10.patch"; do
             [ -f "$c" ] && PATCH="$c" && break
           done
-          [ -z "$PATCH" ] && PATCH=$(find "$GITHUB_WORKSPACE/susfs/kernel_patches/" -name "*5.10*.patch" | sort | head -1)
-          [ -z "$PATCH" ] && echo "❌ SUSFS patch not found" && ls "$GITHUB_WORKSPACE/susfs/kernel_patches/" && exit 1
+          [ -z "$PATCH" ] && PATCH=$(find "$GITHUB_WORKSPACE/susfs/kernel_patches/" \
+            -name "*5.10*.patch" 2>/dev/null | sort | head -1)
+          [ -z "$PATCH" ] && echo "❌ SUSFS patch not found" && exit 1
 
           echo "Applying: $(basename "$PATCH")"
           if patch -p1 --forward < "$PATCH"; then
@@ -237,25 +232,26 @@ jobs:
           else
             patch -p1 --forward --reject-file=/tmp/susfs.rej < "$PATCH" || true
             # Solo abortar si hay hunks realmente fallidos (no solo "Reversed")
-            if find . -name "*.rej" | grep -q . && grep -q "FAILED" /tmp/susfs.rej 2>/dev/null; then
-              echo "❌ SUSFS patch failed — hunks:"
+            if find . -name "*.rej" | grep -q . && \
+               grep -q "^---\|FAILED" /tmp/susfs.rej 2>/dev/null && \
+               ! grep -q "Reversed" /tmp/susfs.rej 2>/dev/null; then
+              echo "❌ SUSFS patch failed"
               cat /tmp/susfs.rej | head -60
               exit 1
             fi
-            echo "⚠ SUSFS applied (minor conflicts resolved)"
+            echo "⚠ SUSFS: minor conflicts resolved (Reversed = already applied)"
           fi
 
-          # KSU bridge — ignorar si ya aplicado (Reversed = OK)
+          # KSU bridge — ignorar si ya aplicado
           KSU_PATCH=$(find "$GITHUB_WORKSPACE/susfs/kernel_patches/" \
             \( -name "*ksu*" -o -name "*kernelsu*" \) 2>/dev/null | head -1)
           if [ -f "$KSU_PATCH" ] && [ -n "$KSU_DIR" ]; then
             ( cd "$KSU_DIR" && patch -p1 --forward < "$KSU_PATCH" 2>/dev/null ) && \
-              echo "✅ KSU bridge applied" || echo "⚠ KSU bridge already applied"
+              echo "✅ KSU bridge applied" || echo "⚠ KSU bridge already applied (OK)"
           fi
 
-      # ── KSU manual hooks — DESPUÉS de SUSFS ─────────────────
-      # Python: sin problemas de escaping. Orden: execveat→faccessat→read→devpts→reboot
-      # Si el anchor no existe → skip (SUSFS ya pudo haberlo añadido)
+      # KSU hooks manuales — DESPUÉS de SUSFS
+      # Python evita problemas de escaping en YAML
       - name: Apply KSU manual hooks
         run: |
           python3 << 'PYEOF'
@@ -269,57 +265,56 @@ jobs:
                   return
               c = open(path).read()
               if marker in c:
-                  print(f"  SKIP {rel} (already has hook)")
+                  print(f"  SKIP {rel} (already hooked)")
                   return
               if search not in c:
-                  print(f"  WARN {rel}: search anchor not found — skipping")
+                  print(f"  WARN {rel}: anchor '{search[:30]}' not found")
                   return
               c = c.replace(search, decl + search, 1)
               if anchor in c:
                   c = c.replace(anchor, anchor + call, 1)
               else:
-                  print(f"  WARN {rel}: call anchor not found, inserting after function brace")
+                  # fallback: insertar tras la primera llave de apertura
                   idx = c.find(search)
-                  br = c.find("{", idx)
+                  br  = c.find("{", idx)
                   if br >= 0:
                       c = c[:br+1] + call + c[br+1:]
               open(path, "w").write(c)
               print(f"  OK  {rel}")
 
-          NL = "\n"
-          T  = "\t"
+          N, T = "\n", "\t"
 
           hook("fs/exec.c", "ksu_handle_execveat",
                "int do_execve(",
-               f"{NL}#ifdef CONFIG_KSU{NL}extern int ksu_handle_execveat(int *fd, struct filename **fn, void *av, void *ev, int *fl);{NL}#endif{NL}",
+               f"{N}#ifdef CONFIG_KSU{N}extern int ksu_handle_execveat(int *fd, struct filename **fn, void *av, void *ev, int *fl);{N}#endif{N}",
                "struct user_arg_ptr envp = { .ptr.native = __envp };",
-               f"{NL}{T}#ifdef CONFIG_KSU{NL}{T}ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);{NL}{T}#endif{NL}")
+               f"{N}{T}#ifdef CONFIG_KSU{N}{T}ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);{N}{T}#endif{N}")
 
           hook("fs/open.c", "ksu_handle_faccessat",
                "long do_faccessat(",
-               f"{NL}#ifdef CONFIG_KSU{NL}extern int ksu_handle_faccessat(int *dfd, const char __user **fn, int *mode, int *fl);{NL}#endif{NL}",
+               f"{N}#ifdef CONFIG_KSU{N}extern int ksu_handle_faccessat(int *dfd, const char __user **fn, int *mode, int *fl);{N}#endif{N}",
                "unsigned int lookup_flags = LOOKUP_FOLLOW;",
-               f"{NL}{T}#ifdef CONFIG_KSU{NL}{T}ksu_handle_faccessat(&dfd, &filename, &mode, NULL);{NL}{T}#endif{NL}")
+               f"{N}{T}#ifdef CONFIG_KSU{N}{T}ksu_handle_faccessat(&dfd, &filename, &mode, NULL);{N}{T}#endif{N}")
 
           hook("fs/read_write.c", "ksu_handle_sys_read",
                "ssize_t vfs_read(",
-               f"{NL}#ifdef CONFIG_KSU{NL}extern int ksu_handle_sys_read(unsigned int fd, char __user **buf, size_t *cnt);{NL}#endif{NL}",
+               f"{N}#ifdef CONFIG_KSU{N}extern int ksu_handle_sys_read(unsigned int fd, char __user **buf, size_t *cnt);{N}#endif{N}",
                "if (!(file->f_mode & FMODE_READ))",
-               f"{NL}{T}#ifdef CONFIG_KSU{NL}{T}ksu_handle_sys_read(0, NULL, NULL);{NL}{T}#endif{NL}")
+               f"{N}{T}#ifdef CONFIG_KSU{N}{T}ksu_handle_sys_read(0, NULL, NULL);{N}{T}#endif{N}")
 
           hook("fs/devpts/inode.c", "ksu_handle_devpts",
                "void *devpts_get_priv(",
-               f"{NL}#ifdef CONFIG_KSU{NL}extern int ksu_handle_devpts(struct inode *);{NL}#endif{NL}",
+               f"{N}#ifdef CONFIG_KSU{N}extern int ksu_handle_devpts(struct inode *);{N}#endif{N}",
                "if (dentry->d_sb->s_magic != DEVPTS_SUPER_MAGIC)",
-               f"{NL}{T}#ifdef CONFIG_KSU{NL}{T}ksu_handle_devpts(dentry->d_inode);{NL}{T}#endif{NL}")
+               f"{N}{T}#ifdef CONFIG_KSU{N}{T}ksu_handle_devpts(dentry->d_inode);{N}{T}#endif{N}")
 
           hook("kernel/reboot.c", "ksu_handle_sys_reboot",
                "SYSCALL_DEFINE4(reboot,",
-               f"{NL}#ifdef CONFIG_KSU{NL}extern int ksu_handle_sys_reboot(int m1, int m2, unsigned int cmd, void __user **arg);{NL}#endif{NL}",
+               f"{N}#ifdef CONFIG_KSU{N}extern int ksu_handle_sys_reboot(int m1, int m2, unsigned int cmd, void __user **arg);{N}#endif{N}",
                "int ret = 0;",
-               f"{NL}{T}#ifdef CONFIG_KSU{NL}{T}ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);{NL}{T}#endif{NL}")
+               f"{N}{T}#ifdef CONFIG_KSU{N}{T}ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);{N}{T}#endif{N}")
 
-          print("Hooks done")
+          print("✅ KSU hooks done")
           'PYEOF'
 
       - name: Apply custom patches
@@ -338,10 +333,9 @@ jobs:
           mkdir -p out
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang gki_defconfig
 
-          # KernelSU
-          scripts/config --file out/.config -e KSU -e KSU_DEBUG
-          # Si hooks manuales → deshabilitar kprobes para evitar Safe Mode accidental
-          scripts/config --file out/.config -d KPROBES -d KPROBE_EVENTS
+          # KernelSU + deshabilitar kprobes (hooks manuales activos)
+          # Sin -d KPROBES el usuario puede activar Safe Mode con volumen abajo
+          scripts/config --file out/.config -e KSU -e KSU_DEBUG -d KPROBES -d KPROBE_EVENTS
 
           # SUSFS v2.0.0
           scripts/config --file out/.config \
@@ -352,9 +346,7 @@ jobs:
             -e KSU_SUSFS_TRY_UMOUNT -e KSU_SUSFS_SPOOF_UNAME \
             -e KSU_SUSFS_ENABLE_LOG -e KSU_SUSFS_OPEN_REDIRECT -e KSU_SUSFS_SUS_SU
 
-          # Scheduler: WALT + EAS + uclamp
-          # WALT = scheduler Qualcomm optimizado para big.LITTLE (A78+A55)
-          # uclamp = permite UCLAMP_MIN=1024 para gaming boost
+          # Scheduler: WALT + EAS + uclamp (gaming boost UCLAMP_MIN=1024)
           scripts/config --file out/.config \
             -e SCHED_WALT -e SCHED_CORE_CTL -e CPU_BOOST \
             -e UCLAMP_TASK -e UCLAMP_TASK_GROUP --set-val UCLAMP_BUCKETS_COUNT 5 \
@@ -363,30 +355,30 @@ jobs:
             -d CPU_FREQ_GOV_ONDEMAND -d CPU_FREQ_GOV_CONSERVATIVE \
             -e CPU_IDLE -e CPU_IDLE_GOV_MENU -e ARM_PSCI_CPUIDLE
 
-          # GPU Adreno 710 devfreq
+          # GPU Adreno 710
           scripts/config --file out/.config \
             -e DEVFREQ_GOV_SIMPLE_ONDEMAND -e DEVFREQ_GOV_PERFORMANCE
 
-          # I/O: Kyber — baja latencia para UFS 3.1 del garnet
+          # I/O Kyber — baja latencia para UFS 3.1
           scripts/config --file out/.config \
             -e MQ_IOSCHED_KYBER -e MQ_IOSCHED_DEADLINE -d IOSCHED_CFQ
 
-          # zRAM con zstd — mejor ratio compresión/velocidad que lz4
+          # zRAM + zstd
           scripts/config --file out/.config \
             -e ZRAM -e ZSMALLOC -e CRYPTO_LZ4 -e CRYPTO_ZSTD \
             -e ZRAM_DEF_COMP_ZSTD -e TRANSPARENT_HUGEPAGE -e TRANSPARENT_HUGEPAGE_MADVISE
 
-          # TCP BBR — mejor throughput en redes celulares (5G de garnet)
+          # TCP BBR — mejor throughput en 5G
           scripts/config --file out/.config \
             -e TCP_CONG_BBR -e NET_SCH_FQ -e NET_SCH_FQ_CODEL \
             --set-str DEFAULT_TCP_CONG bbr
 
-          # Thin LTO — optimizaciones inter-módulos sin el costo de LTO completo
+          # Thin LTO
           if [ "${{ github.event.inputs.ENABLE_LTO }}" != "false" ]; then
             scripts/config --file out/.config -d LTO_NONE -e LTO_CLANG -e THINLTO
           fi
 
-          # Security — Play Integrity / SafetyNet
+          # Security
           scripts/config --file out/.config \
             -e SECURITY_SELINUX -e SECURITY_SELINUX_BOOTPARAM \
             -d SECURITY_SELINUX_DEVELOP \
@@ -396,18 +388,19 @@ jobs:
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang olddefconfig
 
           echo "=== Key configs ==="
-          grep -E "^CONFIG_(KSU|SUSFS|LTO|THINLTO|SCHED_WALT|UCLAMP|ZRAM|KYBER|BBR|KPROBES)" out/.config || true
+          grep -E "^CONFIG_(KSU|SUSFS|LTO|THINLTO|SCHED_WALT|UCLAMP|ZRAM|KYBER|BBR|KPROBES)" \
+            out/.config || true
 
       - name: Build GarnetKernel
         run: |
           cd kernel
           BUILD_START=$(date +%s)
-          echo "Build started: $(date)"
+          echo "Build: $(date)"
 
-          # KCFLAGS: -O3 sin -mcpu= específico
-          # Wild Kernel usa -O2 con march=armv8.2-a (lo que realmente soporta el GKI).
-          # -mcpu=cortex-a78 genera instrucciones que el GKI no espera → bootloop.
-          # -O3 con -march=armv8.2-a da el boost de rendimiento sin romper compatibilidad.
+          # KCFLAGS: -O3 -march=armv8.2-a SIN -mcpu específico
+          # -mcpu=cortex-a78 con Neutron/AOSP Clang más nuevo → bootloop
+          # Wild Kernel usa exactamente -march=armv8.2-a con Clang 12
+          # -mtune=cortex-a55: optimiza para los cores eficientes (mayoría del tiempo de ejecución)
           make -j$(nproc --all) O=out ARCH=arm64 \
             CC="ccache clang" \
             LD=ld.lld AR=llvm-ar NM=llvm-nm \
@@ -424,8 +417,10 @@ jobs:
           BUILD_TIME="$((DIFF/60))m $((DIFF%60))s"
           echo "BUILD_TIME=$BUILD_TIME" >> $GITHUB_ENV
 
-          [ ! -f out/arch/arm64/boot/Image ] && tail -150 out/build.log && exit 1
-          grep -q "LSE atomics not supported" out/build.log && echo "❌ LSE atomics error" && exit 1
+          [ ! -f out/arch/arm64/boot/Image ] && \
+            echo "❌ BUILD FAILED" && tail -150 out/build.log && exit 1
+          grep -q "LSE atomics not supported" out/build.log && \
+            echo "❌ LSE atomics error — LLVM_IAS=1 no funcionó" && exit 1
 
           echo "✅ Build OK — $BUILD_TIME"
           ls -lh out/arch/arm64/boot/Image
@@ -438,6 +433,40 @@ jobs:
       - name: Package ZIP
         run: |
           cp kernel/out/arch/arm64/boot/Image anykernel/
-          [ -f kernel/out/arch/arm64/boot/dtb.img  ] && cp kernel/out/arch/arm64/boot/dtb.img  anykernel/ || true
-          [ -f kernel/out/arch/arm64/boot/dtbo.img ] && cp kernel/out/arch/arm64/boot/dtbo.img anykernel/ || true
-          cp "${{ github.workspace }}/garnet-scripts/anykernel/a
+          [ -f kernel/out/arch/arm64/boot/dtb.img  ] && \
+            cp kernel/out/arch/arm64/boot/dtb.img  anykernel/ || true
+          [ -f kernel/out/arch/arm64/boot/dtbo.img ] && \
+            cp kernel/out/arch/arm64/boot/dtbo.img anykernel/ || true
+          cp "${{ github.workspace }}/garnet-scripts/anykernel/anykernel.sh" anykernel/
+
+          TIMESTAMP=$(date +%Y%m%d-%H%M)
+          SUSFS_TAG="${{ env.SUSFS_VER }}"; [ -z "$SUSFS_TAG" ] && SUSFS_TAG="noSUSFS"
+          ZIPNAME="${{ env.KERNEL_NAME }}-garnet-${TIMESTAMP}-KSU-${{ env.KSU_VER }}-SUSFS-${SUSFS_TAG}.zip"
+          echo "ZIPNAME=$ZIPNAME" >> $GITHUB_ENV
+          cd anykernel && zip -r9 "../$ZIPNAME" . -x "*.git*" -x "*placeholder" && cd ..
+          echo "✅ ZIP: $ZIPNAME ($(du -h "$ZIPNAME" | cut -f1))"
+
+      - name: Upload kernel ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIPNAME }}
+          path: ${{ env.ZIPNAME }}
+          retention-days: 30
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: kernel/out/build.log
+          retention-days: 7
+
+      - name: Build Summary
+        if: success()
+        run: |
+          echo "## ✅ GarnetKernel" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Device | Redmi Note 13 Pro 5G (2312DRA50G) |" >> $GITHUB_STEP_SUMMARY
+          echo "| SoC | SM7435 — 4x A78@2.4GHz + 4x A55@1.95GHz |" >> $GITHUB_STEP_SUMMARY
+        
